@@ -86,17 +86,30 @@ static bool silent_progress_callback(float progress, void* user_data) {
     return true;  // Continue loading
 }
 
+// Empty device list: a null-terminated array with no devices.
+// When passed as model_params.devices, llama.cpp skips all GPU device
+// enumeration entirely — the model loads purely on CPU.
+static ggml_backend_dev_t cpu_only_devices[] = { nullptr };
+
 // Convert our params to llama.cpp model params
 static struct llama_model_params convert_model_params(llama_wrapper_model_params params) {
     struct llama_model_params model_params = llama_model_default_params();
 
     // Only set n_gpu_layers if not -1 (which means "use default/all layers")
-    // llama.cpp default is 999 which effectively means all layers
+    // llama.cpp default is -1 which effectively means all layers
     if (params.n_gpu_layers != -1) {
         model_params.n_gpu_layers = params.n_gpu_layers;
     }
 
-    model_params.main_gpu = params.main_gpu ? atoi(params.main_gpu) : 0;
+    // When n_gpu_layers == 0 (CPU only), pass an empty device list to bypass
+    // GPU enumeration entirely. This prevents a vector::_M_range_check crash
+    // in load_tensors that occurs when CUDA devices are enumerated but no
+    // layers are assigned to them.
+    if (params.n_gpu_layers == 0) {
+        model_params.devices = cpu_only_devices;
+    } else {
+        model_params.main_gpu = params.main_gpu ? atoi(params.main_gpu) : 0;
+    }
     model_params.use_mmap = params.mmap;
     model_params.use_mlock = params.mlock;
     model_params.no_host = false;  // Use host buffers (b6709 added field)
@@ -622,335 +635,20 @@ char* llama_wrapper_generate(void* ctx, llama_wrapper_generate_params params) {
     }
 }
 
+// NOTE: speculative decoding API changed upstream (common_speculative_init now takes
+// common_params_speculative& instead of two llama_context*). These functions are stubbed
+// out until the wrapper is updated to match the new API.
 char* llama_wrapper_generate_draft_with_tokens(void* ctx_target, void* ctx_draft, const int* tokens, int n_tokens, int target_prefix_len, int draft_prefix_len, llama_wrapper_generate_params params) {
-    if (!ctx_target || !ctx_draft || !tokens) {
-        g_last_error = "Target, draft contexts and tokens cannot be null";
-        return nullptr;
-    }
-
-    auto wrapper_tgt = static_cast<llama_wrapper_context_t*>(ctx_target);
-    auto wrapper_dft = static_cast<llama_wrapper_context_t*>(ctx_draft);
-    if (!wrapper_tgt->ctx) {
-        g_last_error = "Target context has been freed";
-        return nullptr;
-    }
-    if (!wrapper_dft->ctx) {
-        g_last_error = "Draft context has been freed";
-        return nullptr;
-    }
-
-    try {
-        // Clear KV caches from divergence points
-        // Sequence ID 0 is the default sequence for single-sequence inference
-        // For speculative generation with full cache hits, we need to refresh the second-to-last token
-        // (since we decode all but last token), so clear from that position
-        int target_clear_from = (target_prefix_len == n_tokens && n_tokens > 1) ? n_tokens - 2 : target_prefix_len;
-        int draft_clear_from = (draft_prefix_len == n_tokens && n_tokens > 1) ? n_tokens - 2 : draft_prefix_len;
-        llama_memory_seq_rm(llama_get_memory(wrapper_tgt->ctx), 0, target_clear_from, -1);
-        llama_memory_seq_rm(llama_get_memory(wrapper_dft->ctx), 0, draft_clear_from, -1);
-
-        // Convert C tokens to vector
-        std::vector<llama_token> prompt_tokens(tokens, tokens + n_tokens);
-
-        if (prompt_tokens.empty()) {
-            g_last_error = "Token array is empty";
-            return nullptr;
-        }
-
-        // Initialize speculative sampling
-        common_speculative* spec = common_speculative_init(wrapper_tgt->ctx, wrapper_dft->ctx);
-        if (!spec) {
-            g_last_error = "Failed to initialize speculative sampling";
-            return nullptr;
-        }
-
-        // Set up parameters
-        common_speculative_params spec_params;
-        spec_params.n_draft = params.n_draft > 0 ? params.n_draft : 16;
-        spec_params.p_min = 0.75f;
-
-        // Create sampling parameters
-        common_params_sampling sampling_params;
-        // Basic sampling
-        sampling_params.seed = params.seed;
-        sampling_params.temp = params.temperature;
-        sampling_params.top_k = params.top_k;
-        sampling_params.top_p = params.top_p;
-        sampling_params.min_p = params.min_p;
-        sampling_params.typ_p = params.typ_p;
-        sampling_params.top_n_sigma = params.top_n_sigma;
-        sampling_params.min_keep = params.min_keep;
-
-        // Repetition penalties
-        sampling_params.penalty_last_n = params.penalty_last_n;
-        sampling_params.penalty_repeat = params.penalty_repeat;
-        sampling_params.penalty_freq = params.penalty_freq;
-        sampling_params.penalty_present = params.penalty_present;
-
-        // DRY sampling
-        sampling_params.dry_multiplier = params.dry_multiplier;
-        sampling_params.dry_base = params.dry_base;
-        sampling_params.dry_allowed_length = params.dry_allowed_length;
-        sampling_params.dry_penalty_last_n = params.dry_penalty_last_n;
-        // Convert dry_sequence_breakers from C array to std::vector
-        sampling_params.dry_sequence_breakers.clear();
-        for (int i = 0; i < params.dry_sequence_breakers_count; i++) {
-            sampling_params.dry_sequence_breakers.push_back(std::string(params.dry_sequence_breakers[i]));
-        }
-
-        // Dynamic temperature
-        sampling_params.dynatemp_range = params.dynatemp_range;
-        sampling_params.dynatemp_exponent = params.dynatemp_exponent;
-
-        // XTC sampling
-        sampling_params.xtc_probability = params.xtc_probability;
-        sampling_params.xtc_threshold = params.xtc_threshold;
-
-        // Mirostat sampling
-        sampling_params.mirostat = params.mirostat;
-        sampling_params.mirostat_tau = params.mirostat_tau;
-        sampling_params.mirostat_eta = params.mirostat_eta;
-
-        // Other parameters
-        sampling_params.n_prev = params.n_prev;
-        sampling_params.n_probs = params.n_probs;
-        sampling_params.ignore_eos = params.ignore_eos;
-
-        // Initialise sampler
-        common_sampler* sampler = common_sampler_init(wrapper_tgt->model, sampling_params);
-        if (!sampler) {
-            common_speculative_free(spec);
-            g_last_error = "Failed to initialise sampler";
-            return nullptr;
-        }
-
-        // Evaluate prompt (all but last token), but only process tokens after the target prefix
-        // If target_prefix_len is at or past the last token, we don't need to decode anything
-        if (prompt_tokens.size() > 1 && target_prefix_len < (int)prompt_tokens.size() - 1) {
-            // Process tokens from target_prefix_len to size - 1
-            int tokens_to_process = prompt_tokens.size() - 1 - target_prefix_len;
-            int n_batch = llama_n_batch(wrapper_tgt->ctx);
-
-            // Process tokens in chunks that respect n_batch limit
-            for (int chunk_start = 0; chunk_start < tokens_to_process; chunk_start += n_batch) {
-                int chunk_size = std::min(n_batch, tokens_to_process - chunk_start);
-                llama_batch batch = llama_batch_init(chunk_size, 0, 1);
-                common_batch_clear(batch);
-
-                // Add tokens for this chunk with explicit positions
-                for (int i = 0; i < chunk_size; i++) {
-                    int token_idx = target_prefix_len + chunk_start + i;
-                    // Only the very last token of the entire prompt needs logits
-                    bool needs_logits = (chunk_start + i == tokens_to_process - 1);
-                    common_batch_add(batch, prompt_tokens[token_idx], token_idx, { 0 }, needs_logits);
-                }
-
-                if (llama_decode(wrapper_tgt->ctx, batch) != 0) {
-                    llama_batch_free(batch);
-                    common_sampler_free(sampler);
-                    common_speculative_free(spec);
-                    g_last_error = "Failed to decode prompt";
-                    return nullptr;
-                }
-
-                llama_batch_free(batch);
-            }
-        } else if (target_prefix_len == (int)prompt_tokens.size() && prompt_tokens.size() > 1) {
-            // Full cache hit - refresh the second-to-last token to ensure determinism
-            // This matches the pattern where we decode all but the last token
-            llama_batch batch = llama_batch_init(512, 0, 1);
-            common_batch_clear(batch);
-            common_batch_add(batch, prompt_tokens[prompt_tokens.size() - 2], prompt_tokens.size() - 2, { 0 }, true);
-
-            if (llama_decode(wrapper_tgt->ctx, batch) != 0) {
-                if (params.debug) {
-                    fprintf(stderr, "WARNING: speculative prompt logit refresh failed\n");
-                }
-                llama_batch_free(batch);
-                common_sampler_free(sampler);
-                common_speculative_free(spec);
-                g_last_error = "Failed to refresh logits for cached speculative prompt";
-                return nullptr;
-            }
-            llama_batch_free(batch);
-        }
-
-        // Generation variables
-        std::string result;
-        llama_token last_token = prompt_tokens.back();
-        llama_tokens prompt_tgt(prompt_tokens.begin(), prompt_tokens.end() - 1);
-        int n_past = prompt_tokens.size() - 1;
-        int n_predict = params.max_tokens > 0 ? params.max_tokens : 128;
-
-        llama_batch batch_tgt = llama_batch_init(llama_n_batch(wrapper_tgt->ctx), 0, 1);
-
-        // Generation loop
-        while (result.length() < (size_t)n_predict) {
-            // Generate draft tokens
-            llama_tokens draft = common_speculative_gen_draft(spec, spec_params, prompt_tgt, last_token);
-
-            // Prepare batch with last token and draft
-            common_batch_clear(batch_tgt);
-            common_batch_add(batch_tgt, last_token, n_past, { 0 }, true);
-
-            for (size_t i = 0; i < draft.size(); ++i) {
-                common_batch_add(batch_tgt, draft[i], n_past + i + 1, { 0 }, true);
-            }
-
-            // Evaluate on target model
-            if (llama_decode(wrapper_tgt->ctx, batch_tgt) != 0) {
-                if (params.debug) {
-                    fprintf(stderr, "WARNING: target decode failed, stopping\n");
-                }
-                break;
-            }
-
-            // Sample and accept tokens
-            const auto ids = common_sampler_sample_and_accept_n(sampler, wrapper_tgt->ctx, draft);
-
-            if (ids.empty()) {
-                break;
-            }
-
-            // Process accepted tokens - track actual count in case of early termination
-            size_t tokens_processed = 0;
-            bool early_termination = false;
-
-            for (size_t i = 0; i < ids.size(); ++i) {
-                const llama_token id = ids[i];
-
-                // Check for EOS
-                if (llama_vocab_is_eog(llama_model_get_vocab(wrapper_tgt->model), id)) {
-                    early_termination = true;
-                    break;
-                }
-
-                const std::string token_str = common_token_to_piece(wrapper_tgt->ctx, id);
-
-                // Call callback if provided
-                if (params.callback_handle != 0) {
-                    if (!goTokenCallback(params.callback_handle, token_str.c_str())) {
-                        early_termination = true;
-                        break;
-                    }
-                }
-
-                result += token_str;
-                prompt_tgt.push_back(id);
-                tokens_processed++;
-
-                // Check stop words
-                for (int j = 0; j < params.stop_words_count; j++) {
-                    if (result.find(params.stop_words[j]) != std::string::npos) {
-                        early_termination = true;
-                        goto early_exit;
-                    }
-                }
-            }
-
-early_exit:
-            // Update position tracking based on tokens actually processed
-            if (early_termination) {
-                n_past += tokens_processed;
-                if (params.debug) {
-                    fprintf(stderr, "DEBUG: Early termination after processing %zu/%zu tokens\n",
-                            tokens_processed, ids.size());
-                }
-            } else {
-                n_past += ids.size();
-            }
-
-            // Clean up any unaccepted/unprocessed tokens from KV cache
-            // This removes everything from position n_past onwards, ensuring the cache
-            // only contains tokens we've actually processed and accepted
-            llama_memory_seq_rm(llama_get_memory(wrapper_tgt->ctx), 0, n_past, -1);
-
-            // Update last token for next iteration
-            if (tokens_processed > 0) {
-                // Use the last token we actually processed
-                last_token = prompt_tgt[prompt_tgt.size() - 1];
-            }
-
-            // Break if early termination
-            if (early_termination) {
-                break;
-            }
-        }
-
-        llama_batch_free(batch_tgt);
-        common_sampler_free(sampler);
-        common_speculative_free(spec);
-
-        // Return allocated string
-        char* c_result = (char*)malloc(result.length() + 1);
-        if (c_result) {
-            memcpy(c_result, result.c_str(), result.length());
-            c_result[result.length()] = '\0';
-        } else {
-            g_last_error = "Failed to allocate memory for result";
-        }
-        return c_result;
-
-    } catch (const std::exception& e) {
-        g_last_error = "Exception during speculative generation: " + std::string(e.what());
-        return nullptr;
-    }
+    (void)ctx_target; (void)ctx_draft; (void)tokens; (void)n_tokens;
+    (void)target_prefix_len; (void)draft_prefix_len; (void)params;
+    g_last_error = "Speculative decoding not available (API update pending)";
+    return nullptr;
 }
 
-// Simple wrapper that tokenises the prompt and handles prefix caching automatically for both models
 char* llama_wrapper_generate_draft(void* ctx_target, void* ctx_draft, llama_wrapper_generate_params params) {
-    if (!ctx_target || !ctx_draft) {
-        g_last_error = "Target and draft contexts cannot be null";
-        return nullptr;
-    }
-
-    auto wrapper_tgt = static_cast<llama_wrapper_context_t*>(ctx_target);
-    auto wrapper_dft = static_cast<llama_wrapper_context_t*>(ctx_draft);
-    if (!wrapper_tgt->ctx) {
-        g_last_error = "Target context has been freed";
-        return nullptr;
-    }
-    if (!wrapper_dft->ctx) {
-        g_last_error = "Draft context has been freed";
-        return nullptr;
-    }
-
-    try {
-        // Tokenise the prompt
-        std::vector<llama_token> prompt_tokens = common_tokenize(wrapper_tgt->ctx, params.prompt, true, true);
-
-        if (prompt_tokens.empty()) {
-            g_last_error = "Failed to tokenize prompt";
-            return nullptr;
-        }
-
-        // Convert to int vector for comparison
-        std::vector<int> tokens_int(prompt_tokens.begin(), prompt_tokens.end());
-
-        // Find common prefix for both contexts (only if prefix caching enabled)
-        int target_prefix_len = params.enable_prefix_caching
-            ? findCommonPrefix(wrapper_tgt->cached_tokens, tokens_int)
-            : 0;
-        int draft_prefix_len = params.enable_prefix_caching
-            ? findCommonPrefix(wrapper_dft->cached_tokens, tokens_int)
-            : 0;
-
-        // Update both caches to new token sequence (only if prefix caching enabled)
-        if (params.enable_prefix_caching) {
-            wrapper_tgt->cached_tokens = tokens_int;
-            wrapper_dft->cached_tokens = tokens_int;
-        } else {
-            wrapper_tgt->cached_tokens.clear();  // Ensure cache is empty when disabled
-            wrapper_dft->cached_tokens.clear();
-        }
-
-        // Call token-based speculative generation with prefix caching
-        return llama_wrapper_generate_draft_with_tokens(ctx_target, ctx_draft, tokens_int.data(), tokens_int.size(), target_prefix_len, draft_prefix_len, params);
-
-    } catch (const std::exception& e) {
-        g_last_error = "Exception during speculative generation: " + std::string(e.what());
-        return nullptr;
-    }
+    (void)ctx_target; (void)ctx_draft; (void)params;
+    g_last_error = "Speculative decoding not available (API update pending)";
+    return nullptr;
 }
 
 int llama_wrapper_tokenize(void* ctx, const char* text, int* tokens, int max_tokens) {
