@@ -4,11 +4,29 @@
 /ggml-metal.metal
 prepare
 
-# static libraries
-libbinding*.a
+# static libraries and object files
+*.a
+*.o
+*.obj
+*.lib
+
+# shared libraries / DLLs
+*.dll
+*.so
+*.dylib
 
 # build output directories
 /build-output
+/build-cuda-dll/
+/build-mingw/
+/cuda-lib/
+
+# Windows build scripts (local)
+build_*.ps1
+build_*.bat
+
+# linker definition files
+*.def
 
 # just in case
 .DS_Store
