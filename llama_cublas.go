@@ -12,6 +12,6 @@ package llama
 
 /*
 #cgo CPPFLAGS: -DGGML_USE_CUDA
-#cgo LDFLAGS: -lggml-cuda -lcublas -lcudart -L/usr/local/cuda/lib64/
+#cgo LDFLAGS: -lggml-cuda -lcublas -lcudart -lcuda -L/usr/local/cuda/lib64/ -L/usr/lib/wsl/lib
 */
 import "C"
