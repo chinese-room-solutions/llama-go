@@ -40,6 +40,21 @@ func formatChatMessages(model *Model, messages []ChatMessage, opts ChatOptions) 
 		return "", fmt.Errorf("failed to apply chat template: %w", err)
 	}
 
+	// When thinking is explicitly disabled, pre-fill the thinking block as
+	// closed so the model skips reasoning and outputs content directly.
+	// This mirrors what Qwen3/DeepSeek templates do when enable_thinking=false
+	// is passed as a template variable, but llama_chat_apply_template doesn't
+	// support passing arbitrary template kwargs, so we post-process instead.
+	if opts.EnableThinking != nil && !*opts.EnableThinking {
+		if strings.HasSuffix(prompt, "<think>\n") {
+			// Template already added <think>, close it immediately.
+			prompt += "\n</think>\n\n"
+		} else if strings.HasSuffix(prompt, "assistant\n") {
+			// Template added assistant turn without <think> — add full closed block.
+			prompt += "<think>\n\n</think>\n\n"
+		}
+	}
+
 	return prompt, nil
 }
 
