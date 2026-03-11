@@ -668,6 +668,160 @@ func (c *Context) generateWithConfig(prompt string, config generateConfig, callb
 	return result, nil
 }
 
+// generateVisionWithConfig generates text from a prompt with images using a vision context.
+// The prompt should contain <__media__> markers where images should be inserted.
+// Images are raw bytes (jpg/png/bmp/gif).
+func (c *Context) generateVisionWithConfig(prompt string, vision *VisionContext, images [][]byte, config generateConfig, callback func(string) bool) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed {
+		return "", fmt.Errorf("context is closed")
+	}
+
+	if c.model == nil {
+		return "", fmt.Errorf("model is closed")
+	}
+	c.model.mu.RLock()
+	modelClosed := c.model.closed
+	c.model.mu.RUnlock()
+	if modelClosed {
+		return "", fmt.Errorf("model is closed")
+	}
+
+	vision.mu.Lock()
+	defer vision.mu.Unlock()
+	if vision.closed {
+		return "", fmt.Errorf("vision context is closed")
+	}
+
+	// Convert prompt to C string
+	cPrompt := C.CString(prompt)
+	defer C.free(unsafe.Pointer(cPrompt))
+
+	// Create bitmaps from image data
+	bitmaps := make([]unsafe.Pointer, len(images))
+	for i, imgData := range images {
+		cData := C.CBytes(imgData)
+		bmp := C.llama_wrapper_mtmd_bitmap_from_buf(vision.ptr,
+			(*C.uchar)(cData), C.int(len(imgData)))
+		C.free(cData)
+		if bmp == nil {
+			for j := 0; j < i; j++ {
+				C.llama_wrapper_mtmd_bitmap_free(bitmaps[j])
+			}
+			return "", fmt.Errorf("failed to create bitmap for image %d: %s",
+				i, C.GoString(C.llama_wrapper_last_error()))
+		}
+		bitmaps[i] = bmp
+	}
+	defer func() {
+		for _, bmp := range bitmaps {
+			C.llama_wrapper_mtmd_bitmap_free(bmp)
+		}
+	}()
+
+	// Convert stop words to C array
+	var cStopWords **C.char
+	var stopWordsCount C.int
+
+	if len(config.stopWords) > 0 {
+		stopWordsCount = C.int(len(config.stopWords))
+		cStopWordsArray := make([]*C.char, len(config.stopWords))
+		for i, word := range config.stopWords {
+			cStopWordsArray[i] = C.CString(word)
+		}
+		defer func() {
+			for _, ptr := range cStopWordsArray {
+				C.free(unsafe.Pointer(ptr))
+			}
+		}()
+		cStopWords = (**C.char)(unsafe.Pointer(&cStopWordsArray[0]))
+	}
+
+	// Set up callback handle if provided
+	var handle cgo.Handle
+	var callbackHandle C.uintptr_t
+	if callback != nil {
+		handle = cgo.NewHandle(callback)
+		callbackHandle = C.uintptr_t(handle)
+		defer handle.Delete()
+	}
+
+	// Convert DRY sequence breakers
+	var cDryBreakers **C.char
+	var dryBreakersCount C.int
+	if len(config.drySequenceBreakers) > 0 {
+		dryBreakersCount = C.int(len(config.drySequenceBreakers))
+		cDryBreakersArray := make([]*C.char, len(config.drySequenceBreakers))
+		for i, breaker := range config.drySequenceBreakers {
+			cDryBreakersArray[i] = C.CString(breaker)
+		}
+		defer func() {
+			for _, ptr := range cDryBreakersArray {
+				C.free(unsafe.Pointer(ptr))
+			}
+		}()
+		cDryBreakers = (**C.char)(unsafe.Pointer(&cDryBreakersArray[0]))
+	}
+
+	params := C.llama_wrapper_generate_params{
+		prompt:                      cPrompt,
+		max_tokens:                  C.int(config.maxTokens),
+		temperature:                 C.float(config.temperature),
+		top_k:                       C.int(config.topK),
+		top_p:                       C.float(config.topP),
+		min_p:                       C.float(config.minP),
+		typ_p:                       C.float(config.typP),
+		top_n_sigma:                 C.float(config.topNSigma),
+		penalty_last_n:              C.int(config.penaltyLastN),
+		penalty_repeat:              C.float(config.penaltyRepeat),
+		penalty_freq:                C.float(config.penaltyFreq),
+		penalty_present:             C.float(config.penaltyPresent),
+		dry_multiplier:              C.float(config.dryMultiplier),
+		dry_base:                    C.float(config.dryBase),
+		dry_allowed_length:          C.int(config.dryAllowedLength),
+		dry_penalty_last_n:          C.int(config.dryPenaltyLastN),
+		dry_sequence_breakers:       cDryBreakers,
+		dry_sequence_breakers_count: dryBreakersCount,
+		dynatemp_range:              C.float(config.dynatempRange),
+		dynatemp_exponent:           C.float(config.dynatempExponent),
+		xtc_probability:             C.float(config.xtcProbability),
+		xtc_threshold:               C.float(config.xtcThreshold),
+		mirostat:                    C.int(config.mirostat),
+		mirostat_tau:                C.float(config.mirostatTau),
+		mirostat_eta:                C.float(config.mirostatEta),
+		n_prev:                      C.int(config.nPrev),
+		n_probs:                     C.int(config.nProbs),
+		min_keep:                    C.int(config.minKeep),
+		seed:                        C.int(config.seed),
+		stop_words:                  cStopWords,
+		stop_words_count:            stopWordsCount,
+		callback_handle:             callbackHandle,
+		ignore_eos:                  C.bool(config.ignoreEOS),
+		debug:                       C.bool(config.debug),
+	}
+
+	// Build bitmap pointer array for C
+	var bitmapPtrs *unsafe.Pointer
+	if len(bitmaps) > 0 {
+		bitmapPtrs = &bitmaps[0]
+	}
+
+	cResult := C.llama_wrapper_vision_generate(c.contextPtr, vision.ptr,
+		cPrompt, (*unsafe.Pointer)(unsafe.Pointer(bitmapPtrs)),
+		C.int(len(bitmaps)), params)
+
+	if cResult == nil {
+		return "", fmt.Errorf("vision generation failed: %s", C.GoString(C.llama_wrapper_last_error()))
+	}
+
+	result := C.GoString(cResult)
+	C.llama_wrapper_free_result(cResult)
+
+	return result, nil
+}
+
 // generateWithTokensAndConfig generates from pre-tokenized input
 func (c *Context) generateWithTokensAndConfig(tokens []int32, config generateConfig, callback func(string) bool) (string, error) {
 	c.mu.Lock()

@@ -6,6 +6,8 @@
 #include "llama.cpp/common/speculative.h"
 #include "llama.cpp/common/chat.h"
 #include "llama.cpp/vendor/nlohmann/json.hpp"
+#include "mtmd.h"
+#include "mtmd-helper.h"
 
 #include <string>
 #include <vector>
@@ -1206,6 +1208,248 @@ void llama_wrapper_get_runtime_info(void* model, void* ctx, const char* kv_cache
         info->n_ctx = 0;
         info->n_batch = 0;
         info->kv_cache_size_mb = 0;
+    }
+}
+
+// --- Vision/multimodal support ---
+
+void* llama_wrapper_mtmd_init(void* model, const char* mmproj_path,
+    bool use_gpu, int n_threads, const char* flash_attn) {
+    if (!model || !mmproj_path) {
+        g_last_error = "Model and mmproj_path cannot be null";
+        return nullptr;
+    }
+
+    auto model_wrapper = static_cast<llama_wrapper_model_t*>(model);
+
+    mtmd_context_params mparams = mtmd_context_params_default();
+    mparams.use_gpu     = use_gpu;
+    mparams.n_threads   = n_threads;
+    mparams.warmup      = true;
+
+    if (flash_attn) {
+        std::string fa(flash_attn);
+        if (fa == "enabled") {
+            mparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+        } else if (fa == "disabled") {
+            mparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+        }
+    }
+
+    mtmd_context* ctx = mtmd_init_from_file(mmproj_path, model_wrapper->model, mparams);
+    if (!ctx) {
+        g_last_error = std::string("Failed to load mmproj from ") + mmproj_path;
+        return nullptr;
+    }
+
+    return ctx;
+}
+
+void llama_wrapper_mtmd_free(void* mtmd_ctx) {
+    if (mtmd_ctx) {
+        mtmd_free(static_cast<mtmd_context*>(mtmd_ctx));
+    }
+}
+
+void* llama_wrapper_mtmd_bitmap_from_buf(void* mtmd_ctx,
+    const unsigned char* buf, int len) {
+    if (!mtmd_ctx || !buf || len <= 0) {
+        g_last_error = "Invalid arguments for bitmap creation";
+        return nullptr;
+    }
+
+    auto ctx = static_cast<mtmd_context*>(mtmd_ctx);
+    mtmd_bitmap* bmp = mtmd_helper_bitmap_init_from_buf(ctx, buf, (size_t)len);
+    if (!bmp) {
+        g_last_error = "Failed to create bitmap from buffer";
+        return nullptr;
+    }
+
+    return bmp;
+}
+
+void llama_wrapper_mtmd_bitmap_free(void* bitmap) {
+    if (bitmap) {
+        mtmd_bitmap_free(static_cast<mtmd_bitmap*>(bitmap));
+    }
+}
+
+char* llama_wrapper_vision_generate(void* ctx, void* mtmd_ctx,
+    const char* text, void** bitmaps, int n_bitmaps,
+    llama_wrapper_generate_params params) {
+    if (!ctx || !mtmd_ctx || !text) {
+        g_last_error = "Context, mtmd_context, and text cannot be null";
+        return nullptr;
+    }
+
+    auto wrapper = static_cast<llama_wrapper_context_t*>(ctx);
+    if (!wrapper->ctx) {
+        g_last_error = "Context has been freed";
+        return nullptr;
+    }
+
+    auto vision_ctx = static_cast<mtmd_context*>(mtmd_ctx);
+
+    try {
+        // Clear entire KV cache (vision requests don't use prefix caching)
+        llama_memory_clear(llama_get_memory(wrapper->ctx), true);
+        wrapper->cached_tokens.clear();
+
+        // Prepare text input
+        mtmd_input_text input_text;
+        input_text.text          = text;
+        input_text.add_special   = true;
+        input_text.parse_special = true;
+
+        // Prepare bitmap pointer array
+        std::vector<const mtmd_bitmap*> bitmap_ptrs((size_t)n_bitmaps);
+        for (int i = 0; i < n_bitmaps; i++) {
+            bitmap_ptrs[i] = static_cast<const mtmd_bitmap*>(bitmaps[i]);
+        }
+
+        // Tokenize text + images into chunks
+        mtmd_input_chunks* chunks = mtmd_input_chunks_init();
+        int32_t tok_res = mtmd_tokenize(vision_ctx, chunks, &input_text,
+            bitmap_ptrs.data(), (size_t)n_bitmaps);
+        if (tok_res != 0) {
+            mtmd_input_chunks_free(chunks);
+            char err_msg[128];
+            snprintf(err_msg, sizeof(err_msg),
+                "Failed to tokenize vision input (error %d)", tok_res);
+            g_last_error = err_msg;
+            return nullptr;
+        }
+
+        // Eval all chunks into KV cache
+        llama_pos n_past = 0;
+        llama_pos new_n_past = 0;
+        int32_t eval_res = mtmd_helper_eval_chunks(vision_ctx, wrapper->ctx,
+            chunks, n_past, 0, llama_n_batch(wrapper->ctx), true, &new_n_past);
+
+        mtmd_input_chunks_free(chunks);
+
+        if (eval_res != 0) {
+            g_last_error = "Failed to evaluate vision chunks";
+            return nullptr;
+        }
+
+        // Check context space for generation
+        int available_ctx = llama_n_ctx(wrapper->ctx);
+        int n_predict = params.max_tokens > 0 ? params.max_tokens : 128;
+        if ((int)new_n_past + n_predict > available_ctx) {
+            n_predict = available_ctx - (int)new_n_past;
+            if (n_predict <= 0) {
+                g_last_error = "No room for generation after vision input";
+                return nullptr;
+            }
+        }
+
+        // Set up sampler (same as text-only path)
+        common_params_sampling sampling_params;
+        sampling_params.seed               = params.seed;
+        sampling_params.temp               = params.temperature;
+        sampling_params.top_k              = params.top_k;
+        sampling_params.top_p              = params.top_p;
+        sampling_params.min_p              = params.min_p;
+        sampling_params.typ_p              = params.typ_p;
+        sampling_params.top_n_sigma        = params.top_n_sigma;
+        sampling_params.min_keep           = params.min_keep;
+        sampling_params.penalty_last_n     = params.penalty_last_n;
+        sampling_params.penalty_repeat     = params.penalty_repeat;
+        sampling_params.penalty_freq       = params.penalty_freq;
+        sampling_params.penalty_present    = params.penalty_present;
+        sampling_params.dry_multiplier     = params.dry_multiplier;
+        sampling_params.dry_base           = params.dry_base;
+        sampling_params.dry_allowed_length = params.dry_allowed_length;
+        sampling_params.dry_penalty_last_n = params.dry_penalty_last_n;
+        sampling_params.dry_sequence_breakers.clear();
+        for (int i = 0; i < params.dry_sequence_breakers_count; i++) {
+            sampling_params.dry_sequence_breakers.push_back(std::string(params.dry_sequence_breakers[i]));
+        }
+        sampling_params.dynatemp_range    = params.dynatemp_range;
+        sampling_params.dynatemp_exponent = params.dynatemp_exponent;
+        sampling_params.xtc_probability   = params.xtc_probability;
+        sampling_params.xtc_threshold     = params.xtc_threshold;
+        sampling_params.mirostat          = params.mirostat;
+        sampling_params.mirostat_tau      = params.mirostat_tau;
+        sampling_params.mirostat_eta      = params.mirostat_eta;
+        sampling_params.n_prev            = params.n_prev;
+        sampling_params.n_probs           = params.n_probs;
+        sampling_params.ignore_eos        = params.ignore_eos;
+
+        common_sampler* sampler = common_sampler_init(wrapper->model, sampling_params);
+        if (!sampler) {
+            g_last_error = "Failed to initialise sampler for vision generation";
+            return nullptr;
+        }
+
+        // Generation loop
+        std::string result;
+        llama_pos gen_past = new_n_past;
+
+        // Convert stop words for checking
+        std::vector<std::string> stop_words;
+        for (int i = 0; i < params.stop_words_count; i++) {
+            stop_words.push_back(std::string(params.stop_words[i]));
+        }
+
+        for (int n_gen = 0; n_gen < n_predict; n_gen++) {
+            llama_token new_token_id = common_sampler_sample(sampler, wrapper->ctx, -1);
+
+            if (llama_vocab_is_eog(llama_model_get_vocab(wrapper->model), new_token_id)) {
+                break;
+            }
+
+            std::string token_text = common_token_to_piece(wrapper->ctx, new_token_id);
+            result += token_text;
+
+            // Streaming callback
+            if (params.callback_handle != 0) {
+                if (!goTokenCallback(params.callback_handle, token_text.c_str())) {
+                    break; // Caller requested stop
+                }
+            }
+
+            // Check stop words
+            bool should_stop = false;
+            for (const auto& sw : stop_words) {
+                if (result.length() >= sw.length() &&
+                    result.compare(result.length() - sw.length(), sw.length(), sw) == 0) {
+                    result = result.substr(0, result.length() - sw.length());
+                    should_stop = true;
+                    break;
+                }
+            }
+            if (should_stop) break;
+
+            // Decode the new token for next iteration
+            common_sampler_accept(sampler, new_token_id, true);
+
+            llama_batch batch = llama_batch_init(1, 0, 1);
+            common_batch_clear(batch);
+            common_batch_add(batch, new_token_id, gen_past++, {0}, true);
+
+            if (llama_decode(wrapper->ctx, batch) != 0) {
+                llama_batch_free(batch);
+                common_sampler_free(sampler);
+                g_last_error = "Failed to decode token during vision generation";
+                return nullptr;
+            }
+            llama_batch_free(batch);
+        }
+
+        common_sampler_free(sampler);
+
+        // Return result
+        char* c_result = (char*)malloc(result.length() + 1);
+        if (c_result) {
+            memcpy(c_result, result.c_str(), result.length() + 1);
+        }
+        return c_result;
+
+    } catch (const std::exception& e) {
+        g_last_error = std::string("Vision generation error: ") + e.what();
+        return nullptr;
     }
 }
 

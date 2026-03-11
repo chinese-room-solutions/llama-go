@@ -38,7 +38,7 @@ endif
 BUILD_TYPE?=
 # keep standard at C11 and C++17
 CFLAGS   = -I./llama.cpp -I. -O3 -DNDEBUG -std=c11 -fPIC
-CXXFLAGS = -I./llama.cpp -I. -I./llama.cpp/common -I./common -I./llama.cpp/ggml/include -I./llama.cpp/include -I./llama.cpp/vendor -O3 -DNDEBUG -std=c++17 -fPIC
+CXXFLAGS = -I./llama.cpp -I. -I./llama.cpp/common -I./common -I./llama.cpp/ggml/include -I./llama.cpp/include -I./llama.cpp/vendor -I./llama.cpp/tools/mtmd -O3 -DNDEBUG -std=c++17 -fPIC
 LDFLAGS  =
 
 # warnings
@@ -239,14 +239,16 @@ llama.cpp/log.o: llama.cpp/ggml.o
 	$(CXX) $(CXXFLAGS) -I./llama.cpp -I./llama.cpp/common -I./llama.cpp/ggml/include -I./llama.cpp/include llama.cpp/common/log.cpp -o llama.cpp/log.o -c $(LDFLAGS)
 
 wrapper.o:
-	$(CXX) $(CXXFLAGS) -I./llama.cpp -I./llama.cpp/common -I./llama.cpp/ggml/include -I./llama.cpp/include wrapper.cpp -o wrapper.o -c $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) -I./llama.cpp -I./llama.cpp/common -I./llama.cpp/ggml/include -I./llama.cpp/include -I./llama.cpp/tools/mtmd wrapper.cpp -o wrapper.o -c $(LDFLAGS)
 
 # All Go bindings are now handled through wrapper.cpp
 
 libbinding.a: llama.cpp/ggml.o wrapper.o $(EXTRA_TARGETS)
 	cd build && cmake --build . --target common
+	cd build && cmake --build . --target mtmd
 	ar crs libbinding.a wrapper.o $(EXTRA_TARGETS)
 	cp build/common/libcommon.a .
+	cp build/tools/mtmd/libmtmd.a .
 ifneq (,$(findstring -DBUILD_SHARED_LIBS=OFF,$(CMAKE_ARGS)))
 	@echo "Copying static libraries..."
 	cp build/src/libllama.a .

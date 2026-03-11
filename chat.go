@@ -16,6 +16,8 @@ import (
 // Chat implementation for Context is in context.go
 // This file contains shared types, options, and helpers
 
+const mediaMarker = "<__media__>"
+
 // formatChatMessages applies the model's chat template to messages.
 //
 // This uses llama.cpp's native chat template system which supports 40+ formats
@@ -90,6 +92,11 @@ func parseReasoning(text string, format ReasoningFormat, chatFormat int) (conten
 //
 // This is an internal helper called by Context.Chat().
 func (m *Model) chatWithContext(ctx gocontext.Context, c *Context, messages []ChatMessage, opts ChatOptions) (*ChatResponse, error) {
+	// Dispatch to vision path if messages contain images
+	if hasImages(messages) {
+		return m.chatVisionWithContext(ctx, c, messages, opts)
+	}
+
 	// Build prompt from messages using chat template
 	prompt, err := formatChatMessages(m, messages, opts)
 	if err != nil {
@@ -171,6 +178,11 @@ Loop:
 //
 // This is an internal helper called by Context.ChatStream().
 func (m *Model) chatStreamWithContext(ctx gocontext.Context, c *Context, messages []ChatMessage, opts ChatOptions) (<-chan ChatDelta, <-chan error) {
+	// Dispatch to vision path if messages contain images
+	if hasImages(messages) {
+		return m.chatVisionStreamWithContext(ctx, c, messages, opts)
+	}
+
 	bufferSize := 256
 	if opts.StreamBufferSize > 0 {
 		bufferSize = opts.StreamBufferSize
@@ -295,6 +307,201 @@ func (m *Model) chatStreamWithContext(ctx gocontext.Context, c *Context, message
 	}()
 
 	return deltaCh, errCh
+}
+
+// collectImages preprocesses messages to extract image data and insert media markers.
+// Returns text-only messages (with markers where images were) and collected image bytes.
+func collectImages(messages []ChatMessage) (textMessages []ChatMessage, images [][]byte) {
+	textMessages = make([]ChatMessage, len(messages))
+	for i, msg := range messages {
+		if len(msg.Parts) == 0 {
+			textMessages[i] = ChatMessage{Role: msg.Role, Content: msg.Content}
+			continue
+		}
+		var content strings.Builder
+		for _, part := range msg.Parts {
+			switch part.Type {
+			case "text":
+				content.WriteString(part.Text)
+			case "image":
+				content.WriteString(mediaMarker)
+				images = append(images, part.Data)
+			}
+		}
+		textMessages[i] = ChatMessage{Role: msg.Role, Content: content.String()}
+	}
+	return textMessages, images
+}
+
+// hasImages returns true if any message contains image parts.
+func hasImages(messages []ChatMessage) bool {
+	for _, msg := range messages {
+		for _, part := range msg.Parts {
+			if part.Type == "image" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// chatVisionWithContext implements non-streaming vision chat completion.
+func (m *Model) chatVisionWithContext(ctx gocontext.Context, c *Context, messages []ChatMessage, opts ChatOptions) (*ChatResponse, error) {
+	vision := opts.VisionContext
+	if vision == nil {
+		return nil, fmt.Errorf("vision context required: messages contain images but ChatOptions.VisionContext is nil")
+	}
+
+	// Preprocess messages: extract images and insert markers
+	textMessages, images := collectImages(messages)
+
+	// Format with chat template (markers are treated as text by the template)
+	prompt, err := formatChatMessages(m, textMessages, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build generation config from chat options
+	config := defaultGenerateConfig
+	for _, opt := range buildVisionGenOpts(opts) {
+		opt(&config)
+	}
+
+	// Call vision generate via context
+	fullOutput, err := c.generateVisionWithConfig(prompt, vision, images, config, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse reasoning
+	chatFormat := m.getChatFormat()
+	parsedContent, reasoning, err := parseReasoning(fullOutput, opts.ReasoningFormat, chatFormat)
+	if err != nil {
+		return &ChatResponse{Content: fullOutput}, nil
+	}
+
+	return &ChatResponse{
+		Content:          parsedContent,
+		ReasoningContent: reasoning,
+	}, nil
+}
+
+// chatVisionStreamWithContext implements streaming vision chat completion.
+func (m *Model) chatVisionStreamWithContext(ctx gocontext.Context, c *Context, messages []ChatMessage, opts ChatOptions) (<-chan ChatDelta, <-chan error) {
+	bufferSize := 256
+	if opts.StreamBufferSize > 0 {
+		bufferSize = opts.StreamBufferSize
+	}
+
+	deltaCh := make(chan ChatDelta, bufferSize)
+	errCh := make(chan error, 1)
+
+	go func() {
+		defer close(deltaCh)
+		defer close(errCh)
+
+		vision := opts.VisionContext
+		if vision == nil {
+			errCh <- fmt.Errorf("vision context required: messages contain images but ChatOptions.VisionContext is nil")
+			return
+		}
+
+		textMessages, images := collectImages(messages)
+
+		prompt, err := formatChatMessages(m, textMessages, opts)
+		if err != nil {
+			errCh <- err
+			return
+		}
+
+		config := defaultGenerateConfig
+		for _, opt := range buildVisionGenOpts(opts) {
+			opt(&config)
+		}
+
+		// Set up streaming callback with reasoning parsing
+		chatFormat := m.getChatFormat()
+		var accumulated strings.Builder
+		var prevContent, prevReasoning string
+
+		callback := func(token string) bool {
+			accumulated.WriteString(token)
+
+			content, reasoning, parseErr := parseReasoning(accumulated.String(), opts.ReasoningFormat, chatFormat)
+			if parseErr != nil {
+				select {
+				case deltaCh <- ChatDelta{Content: token}:
+				case <-ctx.Done():
+					return false
+				}
+				return true
+			}
+
+			contentDelta := content[len(prevContent):]
+			reasoningDelta := reasoning[len(prevReasoning):]
+
+			if contentDelta != "" || reasoningDelta != "" {
+				select {
+				case deltaCh <- ChatDelta{
+					Content:          contentDelta,
+					ReasoningContent: reasoningDelta,
+				}:
+				case <-ctx.Done():
+					return false
+				}
+			}
+
+			prevContent = content
+			prevReasoning = reasoning
+			return true
+		}
+
+		_, err = c.generateVisionWithConfig(prompt, vision, images, config, callback)
+		if err != nil {
+			select {
+			case errCh <- err:
+			default:
+			}
+		}
+	}()
+
+	return deltaCh, errCh
+}
+
+// buildVisionGenOpts converts ChatOptions to GenerateOptions for vision calls.
+func buildVisionGenOpts(opts ChatOptions) []GenerateOption {
+	var genOpts []GenerateOption
+	if opts.MaxTokens != nil {
+		genOpts = append(genOpts, WithMaxTokens(*opts.MaxTokens))
+	}
+	if opts.Temperature != nil {
+		genOpts = append(genOpts, WithTemperature(*opts.Temperature))
+	}
+	if opts.TopP != nil {
+		genOpts = append(genOpts, WithTopP(*opts.TopP))
+	}
+	if opts.TopK != nil {
+		genOpts = append(genOpts, WithTopK(*opts.TopK))
+	}
+	if opts.Seed != nil {
+		genOpts = append(genOpts, WithSeed(*opts.Seed))
+	}
+	if opts.MinP != nil {
+		genOpts = append(genOpts, WithMinP(*opts.MinP))
+	}
+	if opts.RepeatPenalty != nil {
+		genOpts = append(genOpts, WithRepeatPenalty(*opts.RepeatPenalty))
+	}
+	if opts.FrequencyPenalty != nil {
+		genOpts = append(genOpts, WithFrequencyPenalty(*opts.FrequencyPenalty))
+	}
+	if opts.PresencePenalty != nil {
+		genOpts = append(genOpts, WithPresencePenalty(*opts.PresencePenalty))
+	}
+	if len(opts.StopWords) > 0 {
+		genOpts = append(genOpts, WithStopWords(opts.StopWords...))
+	}
+	return genOpts
 }
 
 // Int returns a pointer to the given int value.

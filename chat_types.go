@@ -1,20 +1,49 @@
 package llama
 
+// ContentPart represents a single part of a multipart message.
+// Used for vision/multimodal messages that contain both text and images.
+//
+// Example:
+//
+//	parts := []llama.ContentPart{
+//	    {Type: "text", Text: "What's in this image?"},
+//	    {Type: "image", Data: pngBytes},
+//	}
+type ContentPart struct {
+	Type string // "text" or "image"
+	Text string // Text content (for Type "text")
+	Data []byte // Raw image bytes: jpg, png, bmp, gif (for Type "image")
+}
+
 // ChatMessage represents a message in a chat conversation.
 //
 // Common roles include "system", "user", "assistant", "tool", and "function".
 // The role is not validated by this library - the model's chat template will
 // handle role interpretation and any unknown roles.
 //
-// Example:
+// For text-only messages, use the Content field. For multipart messages
+// (e.g., text + images), use Parts instead. When Parts is non-empty,
+// it takes precedence over Content.
+//
+// Example (text-only):
 //
 //	messages := []llama.ChatMessage{
 //	    {Role: "system", Content: "You are a helpful assistant."},
 //	    {Role: "user", Content: "What is the capital of France?"},
 //	}
+//
+// Example (vision):
+//
+//	messages := []llama.ChatMessage{
+//	    {Role: "user", Parts: []llama.ContentPart{
+//	        {Type: "text", Text: "Describe this image:"},
+//	        {Type: "image", Data: imageBytes},
+//	    }},
+//	}
 type ChatMessage struct {
-	Role    string // Message role (e.g., "system", "user", "assistant")
-	Content string // Message content
+	Role    string        // Message role (e.g., "system", "user", "assistant")
+	Content string        // Simple text content (backward compatible)
+	Parts   []ContentPart // Multipart content (takes precedence over Content when non-empty)
 }
 
 // ChatResponse represents the complete response from a chat completion.

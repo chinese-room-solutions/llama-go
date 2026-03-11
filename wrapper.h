@@ -204,6 +204,31 @@ typedef struct {
 
 void llama_wrapper_get_runtime_info(void* model, void* ctx, const char* kv_cache_type, llama_wrapper_runtime_info* info);
 
+// Vision/multimodal support (mtmd)
+
+// Initialize multimodal context from mmproj file.
+// model: opaque model pointer from llama_wrapper_model_load
+// Returns opaque mtmd_context pointer, or NULL on failure.
+void* llama_wrapper_mtmd_init(void* model, const char* mmproj_path,
+    bool use_gpu, int n_threads, const char* flash_attn);
+void  llama_wrapper_mtmd_free(void* mtmd_ctx);
+
+// Create bitmap from raw image bytes (jpg/png/bmp/gif via stb_image).
+// Returns opaque mtmd_bitmap pointer, or NULL on failure.
+void* llama_wrapper_mtmd_bitmap_from_buf(void* mtmd_ctx,
+    const unsigned char* buf, int len);
+void  llama_wrapper_mtmd_bitmap_free(void* bitmap);
+
+// Vision generate: format text with <__media__> markers, tokenize with images,
+// eval chunks into KV cache, then sample response.
+// text: formatted prompt with <__media__> markers where images should be inserted
+// bitmaps: array of opaque bitmap pointers
+// n_bitmaps: number of bitmaps (must match number of markers in text)
+// Returns generated text (caller frees with llama_wrapper_free_result), or NULL on error.
+char* llama_wrapper_vision_generate(void* ctx, void* mtmd_ctx,
+    const char* text, void** bitmaps, int n_bitmaps,
+    llama_wrapper_generate_params params);
+
 #ifdef __cplusplus
 }
 #endif

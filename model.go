@@ -8,9 +8,9 @@ import (
 )
 
 /*
-#cgo CFLAGS: -I./llama.cpp -I./ -I./llama.cpp/ggml/include -I./llama.cpp/include -I./llama.cpp/common -I./llama.cpp/vendor
-#cgo CPPFLAGS: -I./llama.cpp -I./ -I./llama.cpp/ggml/include -I./llama.cpp/include -I./llama.cpp/common -I./llama.cpp/vendor
-#cgo LDFLAGS: -L./ -lbinding -lcommon -lllama -lggml -lggml-cpu -lggml-base -lstdc++ -lm -lgomp
+#cgo CFLAGS: -I./llama.cpp -I./ -I./llama.cpp/ggml/include -I./llama.cpp/include -I./llama.cpp/common -I./llama.cpp/vendor -I./llama.cpp/tools/mtmd
+#cgo CPPFLAGS: -I./llama.cpp -I./ -I./llama.cpp/ggml/include -I./llama.cpp/include -I./llama.cpp/common -I./llama.cpp/vendor -I./llama.cpp/tools/mtmd
+#cgo LDFLAGS: -L./ -lbinding -lmtmd -lcommon -lllama -lggml -lggml-cpu -lggml-base -lstdc++ -lm -lgomp
 #include "wrapper.h"
 #include <stdlib.h>
 
