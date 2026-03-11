@@ -22,6 +22,12 @@ type ChatOptions struct {
 	Seed        *int     // Random seed for reproducible generation (nil = random)
 	StopWords   []string // Additional stop sequences beyond model defaults
 
+	// Extended sampling options
+	MinP             *float32 // Minimum probability threshold (nil = default 0.05)
+	RepeatPenalty    *float32 // Repeat penalty multiplier (nil = default 1.0 = disabled)
+	FrequencyPenalty *float32 // Frequency-based penalty (nil = default 0.0 = disabled)
+	PresencePenalty  *float32 // Presence-based penalty (nil = default 0.0 = disabled)
+
 	// Chat template (Jinja2 template string)
 	// If empty, uses model's GGUF template. If model has no template, returns error.
 	// Supports 40+ formats: chatml, llama2, llama3, mistral, gemma, phi3, etc.

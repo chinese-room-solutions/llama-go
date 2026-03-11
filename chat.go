@@ -117,6 +117,18 @@ func (m *Model) chatWithContext(ctx gocontext.Context, c *Context, messages []Ch
 	if opts.Seed != nil {
 		genOpts = append(genOpts, WithSeed(*opts.Seed))
 	}
+	if opts.MinP != nil {
+		genOpts = append(genOpts, WithMinP(*opts.MinP))
+	}
+	if opts.RepeatPenalty != nil {
+		genOpts = append(genOpts, WithRepeatPenalty(*opts.RepeatPenalty))
+	}
+	if opts.FrequencyPenalty != nil {
+		genOpts = append(genOpts, WithFrequencyPenalty(*opts.FrequencyPenalty))
+	}
+	if opts.PresencePenalty != nil {
+		genOpts = append(genOpts, WithPresencePenalty(*opts.PresencePenalty))
+	}
 
 	// Generate using context's GenerateChannel
 	tokenCh, errCh := c.GenerateChannel(ctx, prompt, genOpts...)
@@ -201,6 +213,18 @@ func (m *Model) chatStreamWithContext(ctx gocontext.Context, c *Context, message
 		}
 		if opts.Seed != nil {
 			genOpts = append(genOpts, WithSeed(*opts.Seed))
+		}
+		if opts.MinP != nil {
+			genOpts = append(genOpts, WithMinP(*opts.MinP))
+		}
+		if opts.RepeatPenalty != nil {
+			genOpts = append(genOpts, WithRepeatPenalty(*opts.RepeatPenalty))
+		}
+		if opts.FrequencyPenalty != nil {
+			genOpts = append(genOpts, WithFrequencyPenalty(*opts.FrequencyPenalty))
+		}
+		if opts.PresencePenalty != nil {
+			genOpts = append(genOpts, WithPresencePenalty(*opts.PresencePenalty))
 		}
 
 		// Use context's GenerateChannel
