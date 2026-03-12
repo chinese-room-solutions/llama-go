@@ -91,6 +91,13 @@ typedef bool (*llama_wrapper_token_callback)(const char* token);
 // Logging initialization
 void llama_wrapper_init_logging();
 
+// Log callback type for routing logs to Go
+// level: 0=NONE, 1=DEBUG, 2=INFO, 3=WARN, 4=ERROR
+typedef void (*llama_wrapper_log_callback)(int level, const char* text, void* user_data);
+
+// Set a custom log callback. Pass NULL to restore the default stderr logger.
+void llama_wrapper_set_log_callback(llama_wrapper_log_callback callback, void* user_data);
+
 // Model management
 void* llama_wrapper_model_load(const char* model_path, llama_wrapper_model_params params);
 void llama_wrapper_model_free(void* model);

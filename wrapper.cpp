@@ -25,9 +25,18 @@ static std::string g_last_error;
 // Global log level control
 static ggml_log_level g_min_log_level = GGML_LOG_LEVEL_INFO;
 
+// Custom Go log callback (NULL = use default stderr logger)
+static llama_wrapper_log_callback g_custom_log_callback = nullptr;
+static void* g_custom_log_user_data = nullptr;
+
 // Log callback that respects LLAMA_LOG environment variable
 static void llama_log_callback(ggml_log_level level, const char * text, void * /*user_data*/) {
-    if (level >= g_min_log_level) {
+    if (level < g_min_log_level) {
+        return;
+    }
+    if (g_custom_log_callback != nullptr) {
+        g_custom_log_callback(static_cast<int>(level), text, g_custom_log_user_data);
+    } else {
         fprintf(stderr, "%s", text);
     }
 }
@@ -53,6 +62,11 @@ void llama_wrapper_init_logging() {
         }
     }
     llama_log_set(llama_log_callback, nullptr);
+}
+
+void llama_wrapper_set_log_callback(llama_wrapper_log_callback callback, void* user_data) {
+    g_custom_log_callback = callback;
+    g_custom_log_user_data = user_data;
 }
 
 // Forward declarations of Go callback functions
