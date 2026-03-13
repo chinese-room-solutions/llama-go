@@ -1,18 +1,27 @@
 package llama
 
+// ContentType identifies the media kind in a ContentPart.
+type ContentType string
+
+const (
+	ContentText  ContentType = "text"  // Inline text
+	ContentImage ContentType = "image" // Raw image bytes (jpg, png, bmp, gif)
+	ContentAudio ContentType = "audio" // Raw audio bytes (wav)
+)
+
 // ContentPart represents a single part of a multipart message.
-// Used for vision/multimodal messages that contain both text and images.
+// Used for multimodal messages that combine text with images, audio, etc.
 //
 // Example:
 //
 //	parts := []llama.ContentPart{
-//	    {Type: "text", Text: "What's in this image?"},
-//	    {Type: "image", Data: pngBytes},
+//	    {Type: llama.ContentText, Text: "What's in this image?"},
+//	    {Type: llama.ContentImage, Data: pngBytes},
 //	}
 type ContentPart struct {
-	Type string // "text" or "image"
-	Text string // Text content (for Type "text")
-	Data []byte // Raw image bytes: jpg, png, bmp, gif (for Type "image")
+	Type ContentType // Media type
+	Text string      // Text content (for ContentText)
+	Data []byte      // Raw media bytes (for ContentImage, ContentAudio)
 }
 
 // ChatMessage represents a message in a chat conversation.
@@ -32,12 +41,12 @@ type ContentPart struct {
 //	    {Role: "user", Content: "What is the capital of France?"},
 //	}
 //
-// Example (vision):
+// Example (multimodal):
 //
 //	messages := []llama.ChatMessage{
 //	    {Role: "user", Parts: []llama.ContentPart{
-//	        {Type: "text", Text: "Describe this image:"},
-//	        {Type: "image", Data: imageBytes},
+//	        {Type: llama.ContentText, Text: "Describe this image:"},
+//	        {Type: llama.ContentImage, Data: imageBytes},
 //	    }},
 //	}
 type ChatMessage struct {

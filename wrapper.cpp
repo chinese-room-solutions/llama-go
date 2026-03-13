@@ -1250,6 +1250,13 @@ void* llama_wrapper_mtmd_init(void* model, const char* mmproj_path,
         }
     }
 
+    // Force print_timings so we get encoding time in logs
+    mparams.print_timings = true;
+
+    // Route mtmd/clip logs through our log callback so they appear in the
+    // application log instead of only going to stderr.
+    mtmd_helper_log_set(llama_log_callback, nullptr);
+
     mtmd_context* ctx = mtmd_init_from_file(mmproj_path, model_wrapper->model, mparams);
     if (!ctx) {
         g_last_error = std::string("Failed to load mmproj from ") + mmproj_path;
@@ -1334,6 +1341,13 @@ char* llama_wrapper_vision_generate(void* ctx, void* mtmd_ctx,
             return nullptr;
         }
 
+        {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "vision: tokenized %zu chunks, n_images=%d",
+                mtmd_input_chunks_size(chunks), n_bitmaps);
+            llama_log_callback(GGML_LOG_LEVEL_INFO, buf, nullptr);
+        }
+
         // Eval all chunks into KV cache
         llama_pos n_past = 0;
         llama_pos new_n_past = 0;
@@ -1397,6 +1411,15 @@ char* llama_wrapper_vision_generate(void* ctx, void* mtmd_ctx,
             return nullptr;
         }
 
+        {
+            char buf[256];
+            snprintf(buf, sizeof(buf),
+                "vision: sampling temp=%.3f top_k=%d top_p=%.3f min_p=%.3f max_tokens=%d n_past=%d",
+                sampling_params.temp, sampling_params.top_k, sampling_params.top_p,
+                sampling_params.min_p, n_predict, (int)new_n_past);
+            llama_log_callback(GGML_LOG_LEVEL_INFO, buf, nullptr);
+        }
+
         // Generation loop
         std::string result;
         llama_pos gen_past = new_n_past;
@@ -1436,12 +1459,14 @@ char* llama_wrapper_vision_generate(void* ctx, void* mtmd_ctx,
             }
             if (should_stop) break;
 
-            // Decode the new token for next iteration
+            // Accept token into sampler (matches reference implementation)
             common_sampler_accept(sampler, new_token_id, true);
 
+            // Decode the new token for next iteration
             llama_batch batch = llama_batch_init(1, 0, 1);
             common_batch_clear(batch);
-            common_batch_add(batch, new_token_id, gen_past++, {0}, true);
+            common_batch_add(batch, new_token_id, gen_past, {0}, true);
+            gen_past++;
 
             if (llama_decode(wrapper->ctx, batch) != 0) {
                 llama_batch_free(batch);

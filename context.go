@@ -668,10 +668,11 @@ func (c *Context) generateWithConfig(prompt string, config generateConfig, callb
 	return result, nil
 }
 
-// generateVisionWithConfig generates text from a prompt with images using a vision context.
-// The prompt should contain <__media__> markers where images should be inserted.
-// Images are raw bytes (jpg/png/bmp/gif).
-func (c *Context) generateVisionWithConfig(prompt string, vision *VisionContext, images [][]byte, config generateConfig, callback func(string) bool) (string, error) {
+// generateVisionWithConfig generates text from a prompt with media using a vision context.
+// The prompt should contain <__media__> markers where media should be inserted.
+// Media items are raw bytes — images (jpg/png/bmp/gif) or audio (wav).
+// The underlying mtmd layer auto-detects the media type from the byte content.
+func (c *Context) generateVisionWithConfig(prompt string, vision *VisionContext, media [][]byte, config generateConfig, callback func(string) bool) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -699,18 +700,18 @@ func (c *Context) generateVisionWithConfig(prompt string, vision *VisionContext,
 	cPrompt := C.CString(prompt)
 	defer C.free(unsafe.Pointer(cPrompt))
 
-	// Create bitmaps from image data
-	bitmaps := make([]unsafe.Pointer, len(images))
-	for i, imgData := range images {
-		cData := C.CBytes(imgData)
+	// Create bitmaps from media data (mtmd auto-detects image vs audio)
+	bitmaps := make([]unsafe.Pointer, len(media))
+	for i, data := range media {
+		cData := C.CBytes(data)
 		bmp := C.llama_wrapper_mtmd_bitmap_from_buf(vision.ptr,
-			(*C.uchar)(cData), C.int(len(imgData)))
+			(*C.uchar)(cData), C.int(len(data)))
 		C.free(cData)
 		if bmp == nil {
 			for j := 0; j < i; j++ {
 				C.llama_wrapper_mtmd_bitmap_free(bitmaps[j])
 			}
-			return "", fmt.Errorf("failed to create bitmap for image %d: %s",
+			return "", fmt.Errorf("failed to create bitmap for media %d: %s",
 				i, C.GoString(C.llama_wrapper_last_error()))
 		}
 		bitmaps[i] = bmp

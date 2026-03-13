@@ -92,8 +92,8 @@ func parseReasoning(text string, format ReasoningFormat, chatFormat int) (conten
 //
 // This is an internal helper called by Context.Chat().
 func (m *Model) chatWithContext(ctx gocontext.Context, c *Context, messages []ChatMessage, opts ChatOptions) (*ChatResponse, error) {
-	// Dispatch to vision path if messages contain images
-	if hasImages(messages) {
+	// Dispatch to multimodal path if messages contain media
+	if hasMedia(messages) {
 		return m.chatVisionWithContext(ctx, c, messages, opts)
 	}
 
@@ -178,8 +178,8 @@ Loop:
 //
 // This is an internal helper called by Context.ChatStream().
 func (m *Model) chatStreamWithContext(ctx gocontext.Context, c *Context, messages []ChatMessage, opts ChatOptions) (<-chan ChatDelta, <-chan error) {
-	// Dispatch to vision path if messages contain images
-	if hasImages(messages) {
+	// Dispatch to multimodal path if messages contain media
+	if hasMedia(messages) {
 		return m.chatVisionStreamWithContext(ctx, c, messages, opts)
 	}
 
@@ -309,35 +309,45 @@ func (m *Model) chatStreamWithContext(ctx gocontext.Context, c *Context, message
 	return deltaCh, errCh
 }
 
-// collectImages preprocesses messages to extract image data and insert media markers.
-// Returns text-only messages (with markers where images were) and collected image bytes.
-func collectImages(messages []ChatMessage) (textMessages []ChatMessage, images [][]byte) {
+// collectMedia preprocesses messages to extract media data and insert markers.
+// Returns text-only messages (with markers where media was) and collected media bytes.
+// Media markers are placed before the text content of each message, as most
+// multimodal models expect media tokens to precede the text tokens.
+func collectMedia(messages []ChatMessage) (textMessages []ChatMessage, media [][]byte) {
 	textMessages = make([]ChatMessage, len(messages))
 	for i, msg := range messages {
 		if len(msg.Parts) == 0 {
 			textMessages[i] = ChatMessage{Role: msg.Role, Content: msg.Content}
 			continue
 		}
-		var content strings.Builder
+		var textParts strings.Builder
+		var mediaCount int
 		for _, part := range msg.Parts {
 			switch part.Type {
-			case "text":
-				content.WriteString(part.Text)
-			case "image":
-				content.WriteString(mediaMarker)
-				images = append(images, part.Data)
+			case ContentText:
+				textParts.WriteString(part.Text)
+			case ContentImage, ContentAudio:
+				mediaCount++
+				media = append(media, part.Data)
 			}
 		}
+		// Prepend media markers before text (most models require markers before text).
+		var content strings.Builder
+		for range mediaCount {
+			content.WriteString(mediaMarker)
+		}
+		content.WriteString(textParts.String())
 		textMessages[i] = ChatMessage{Role: msg.Role, Content: content.String()}
 	}
-	return textMessages, images
+	return textMessages, media
 }
 
-// hasImages returns true if any message contains image parts.
-func hasImages(messages []ChatMessage) bool {
+// hasMedia returns true if any message contains non-text media parts.
+func hasMedia(messages []ChatMessage) bool {
 	for _, msg := range messages {
 		for _, part := range msg.Parts {
-			if part.Type == "image" {
+			switch part.Type {
+			case ContentImage, ContentAudio:
 				return true
 			}
 		}
@@ -349,11 +359,13 @@ func hasImages(messages []ChatMessage) bool {
 func (m *Model) chatVisionWithContext(ctx gocontext.Context, c *Context, messages []ChatMessage, opts ChatOptions) (*ChatResponse, error) {
 	vision := opts.VisionContext
 	if vision == nil {
-		return nil, fmt.Errorf("vision context required: messages contain images but ChatOptions.VisionContext is nil")
+		return nil, fmt.Errorf("vision context required: messages contain media but ChatOptions.VisionContext is nil")
 	}
 
-	// Preprocess messages: extract images and insert markers
-	textMessages, images := collectImages(messages)
+	// Preprocess messages: extract media and insert markers
+	textMessages, media := collectMedia(messages)
+
+	logInfo("vision: n_media=%d", len(media))
 
 	// Format with chat template (markers are treated as text by the template)
 	prompt, err := formatChatMessages(m, textMessages, opts)
@@ -368,7 +380,7 @@ func (m *Model) chatVisionWithContext(ctx gocontext.Context, c *Context, message
 	}
 
 	// Call vision generate via context
-	fullOutput, err := c.generateVisionWithConfig(prompt, vision, images, config, nil)
+	fullOutput, err := c.generateVisionWithConfig(prompt, vision, media, config, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -402,11 +414,11 @@ func (m *Model) chatVisionStreamWithContext(ctx gocontext.Context, c *Context, m
 
 		vision := opts.VisionContext
 		if vision == nil {
-			errCh <- fmt.Errorf("vision context required: messages contain images but ChatOptions.VisionContext is nil")
+			errCh <- fmt.Errorf("vision context required: messages contain media but ChatOptions.VisionContext is nil")
 			return
 		}
 
-		textMessages, images := collectImages(messages)
+		textMessages, media := collectMedia(messages)
 
 		prompt, err := formatChatMessages(m, textMessages, opts)
 		if err != nil {
@@ -456,7 +468,7 @@ func (m *Model) chatVisionStreamWithContext(ctx gocontext.Context, c *Context, m
 			return true
 		}
 
-		_, err = c.generateVisionWithConfig(prompt, vision, images, config, callback)
+		_, err = c.generateVisionWithConfig(prompt, vision, media, config, callback)
 		if err != nil {
 			select {
 			case errCh <- err:

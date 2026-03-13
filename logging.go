@@ -13,6 +13,7 @@ static inline llama_wrapper_log_callback get_go_log_callback() {
 */
 import "C"
 import (
+	"fmt"
 	"strings"
 	"unsafe"
 )
@@ -76,5 +77,12 @@ func goLogCallback(level C.int, text *C.char, _ unsafe.Pointer) {
 		if msg != "" {
 			globalLogCallback(LogLevel(level), msg)
 		}
+	}
+}
+
+// logInfo sends a formatted info message through the global log callback.
+func logInfo(format string, args ...any) {
+	if globalLogCallback != nil {
+		globalLogCallback(LogLevelInfo, fmt.Sprintf(format, args...))
 	}
 }
