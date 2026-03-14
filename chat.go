@@ -165,12 +165,13 @@ Loop:
 	parsedContent, reasoning, err := parseReasoning(fullOutput, opts.ReasoningFormat, chatFormat)
 	if err != nil {
 		// If parsing fails, return content as-is without reasoning extraction
-		return &ChatResponse{Content: fullOutput}, nil
+		return &ChatResponse{Content: fullOutput, Usage: c.lastUsage}, nil
 	}
 
 	return &ChatResponse{
 		Content:          parsedContent,
 		ReasoningContent: reasoning,
+		Usage:            c.lastUsage,
 	}, nil
 }
 
@@ -395,6 +396,7 @@ func (m *Model) chatVisionWithContext(ctx gocontext.Context, c *Context, message
 	return &ChatResponse{
 		Content:          parsedContent,
 		ReasoningContent: reasoning,
+		Usage:            c.lastUsage,
 	}, nil
 }
 

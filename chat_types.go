@@ -74,7 +74,17 @@ type ChatMessage struct {
 type ChatResponse struct {
 	Content          string // Regular response content
 	ReasoningContent string // Extracted reasoning/thinking (if reasoning model)
-	// Future fields: ToolCalls, FinishReason, Usage, etc.
+	Usage            Usage  // Token usage statistics
+}
+
+// Usage contains token usage statistics and timing from a generation request.
+type Usage struct {
+	PromptTokens     int     // Number of tokens in the prompt
+	CompletionTokens int     // Number of tokens generated
+	TotalTokens      int     // PromptTokens + CompletionTokens
+	PromptEvalMs     float64 // Time spent evaluating prompt (milliseconds)
+	EvalMs           float64 // Time spent generating tokens (milliseconds)
+	TokensPerSecond  float64 // Generation speed (completion_tokens / eval_time)
 }
 
 // ChatDelta represents a streaming chunk from chat completion.

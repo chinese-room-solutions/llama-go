@@ -83,6 +83,10 @@ struct llama_wrapper_context_t {
     llama_context* ctx;
     llama_model* model;  // Reference to parent model
     std::vector<int> cached_tokens;  // Cache for prefix matching optimisation
+    int last_prompt_tokens;     // Token count from last generation
+    int last_completion_tokens; // Token count from last generation
+    double last_prompt_eval_ms; // Prompt eval time from last generation
+    double last_eval_ms;        // Token generation time from last generation
 };
 
 const char* llama_wrapper_last_error() {
@@ -152,6 +156,7 @@ static struct llama_context_params convert_context_params(llama_wrapper_model_pa
     ctx_params.n_threads_batch = params.n_threads_batch > 0 ? params.n_threads_batch : ctx_params.n_threads;
     ctx_params.n_seq_max = params.n_parallel > 0 ? params.n_parallel : 1;
     ctx_params.embeddings = params.embeddings;
+    ctx_params.no_perf = false;  // Enable perf counters for token usage timing
 
     // Set KV cache quantization type
     if (params.kv_cache_type != nullptr) {
@@ -317,6 +322,9 @@ char* llama_wrapper_generate_with_tokens(void* ctx, const int* tokens, int n_tok
         g_last_error = "Context has been freed";
         return nullptr;
     }
+
+    // Reset perf counters so timing is per-request, not cumulative.
+    llama_perf_context_reset(wrapper->ctx);
 
     try {
         // Convert C tokens to vector
@@ -597,6 +605,16 @@ generation_done:
         } else {
             g_last_error = "Failed to allocate memory for result";
         }
+
+        // Store token counts and timing for retrieval by _ex wrappers
+        wrapper->last_prompt_tokens = (int)prompt_tokens.size();
+        wrapper->last_completion_tokens = n_decode;
+
+        // Capture timing from llama.cpp perf counters
+        auto perf = llama_perf_context(wrapper->ctx);
+        wrapper->last_prompt_eval_ms = perf.t_p_eval_ms;
+        wrapper->last_eval_ms = perf.t_eval_ms;
+
         return c_result;
 
     } catch (const std::exception& e) {
@@ -649,6 +667,41 @@ char* llama_wrapper_generate(void* ctx, llama_wrapper_generate_params params) {
         g_last_error = "Exception during generation: " + std::string(e.what());
         return nullptr;
     }
+}
+
+// Extended generation functions that return token usage info
+
+void llama_wrapper_free_generate_result(llama_wrapper_generate_result* result) {
+    if (result && result->text) {
+        free(result->text);
+        result->text = nullptr;
+    }
+}
+
+llama_wrapper_generate_result llama_wrapper_generate_with_tokens_ex(void* ctx, const int* tokens, int n_tokens, int prefix_len, llama_wrapper_generate_params params) {
+    llama_wrapper_generate_result res = {nullptr, 0, 0, 0.0, 0.0};
+    res.text = llama_wrapper_generate_with_tokens(ctx, tokens, n_tokens, prefix_len, params);
+    if (res.text && ctx) {
+        auto wrapper = static_cast<llama_wrapper_context_t*>(ctx);
+        res.prompt_tokens = wrapper->last_prompt_tokens;
+        res.completion_tokens = wrapper->last_completion_tokens;
+        res.prompt_eval_ms = wrapper->last_prompt_eval_ms;
+        res.eval_ms = wrapper->last_eval_ms;
+    }
+    return res;
+}
+
+llama_wrapper_generate_result llama_wrapper_generate_ex(void* ctx, llama_wrapper_generate_params params) {
+    llama_wrapper_generate_result res = {nullptr, 0, 0, 0.0, 0.0};
+    res.text = llama_wrapper_generate(ctx, params);
+    if (res.text && ctx) {
+        auto wrapper = static_cast<llama_wrapper_context_t*>(ctx);
+        res.prompt_tokens = wrapper->last_prompt_tokens;
+        res.completion_tokens = wrapper->last_completion_tokens;
+        res.prompt_eval_ms = wrapper->last_prompt_eval_ms;
+        res.eval_ms = wrapper->last_eval_ms;
+    }
+    return res;
 }
 
 // NOTE: speculative decoding API changed upstream (common_speculative_init now takes

@@ -37,9 +37,19 @@ type Context struct {
 	config     contextConfig
 	mu         sync.RWMutex
 	closed     bool
+	lastUsage  Usage // Token usage from last generation
 }
 
 // Config types are defined in types.go
+
+// LastUsage returns token usage statistics from the last generation call.
+// For non-streaming Chat(), the usage is also available in ChatResponse.Usage.
+// For streaming (ChatStream/GenerateStream), call this after the stream completes.
+func (c *Context) LastUsage() Usage {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.lastUsage
+}
 
 // Close frees the context and its associated resources.
 //
@@ -656,14 +666,31 @@ func (c *Context) generateWithConfig(prompt string, config generateConfig, callb
 		debug:                C.bool(config.debug),
 	}
 
-	// Call C generation function
-	cResult := C.llama_wrapper_generate(c.contextPtr, params)
-	if cResult == nil {
+	// Call C generation function (extended version with token usage)
+	cResult := C.llama_wrapper_generate_ex(c.contextPtr, params)
+	if cResult.text == nil {
 		return "", fmt.Errorf("generation failed: %s", C.GoString(C.llama_wrapper_last_error()))
 	}
 
-	result := C.GoString(cResult)
-	C.llama_wrapper_free_result(cResult)
+	result := C.GoString(cResult.text)
+	C.llama_wrapper_free_result(cResult.text)
+
+	// Capture token usage and timing
+	promptTokens := int(cResult.prompt_tokens)
+	completionTokens := int(cResult.completion_tokens)
+	evalMs := float64(cResult.eval_ms)
+	var tps float64
+	if evalMs > 0 && completionTokens > 0 {
+		tps = float64(completionTokens) / (evalMs / 1000.0)
+	}
+	c.lastUsage = Usage{
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		TotalTokens:      promptTokens + completionTokens,
+		PromptEvalMs:     float64(cResult.prompt_eval_ms),
+		EvalMs:           evalMs,
+		TokensPerSecond:  tps,
+	}
 
 	return result, nil
 }

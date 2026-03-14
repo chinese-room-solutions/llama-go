@@ -85,6 +85,18 @@ typedef struct {
     bool ignore_eos;
 } llama_wrapper_generate_params;
 
+// Generation result with token usage and timing
+typedef struct {
+    char* text;            // Generated text (caller frees with llama_wrapper_free_result)
+    int prompt_tokens;     // Number of prompt tokens
+    int completion_tokens; // Number of generated tokens
+    double prompt_eval_ms; // Time spent evaluating prompt (milliseconds)
+    double eval_ms;        // Time spent generating tokens (milliseconds)
+} llama_wrapper_generate_result;
+
+// Free a generate result (frees the text field)
+void llama_wrapper_free_generate_result(llama_wrapper_generate_result* result);
+
 // Callback for streaming tokens
 typedef bool (*llama_wrapper_token_callback)(const char* token);
 
@@ -109,6 +121,10 @@ void llama_wrapper_context_free(void* ctx);
 // Text generation
 char* llama_wrapper_generate(void* ctx, llama_wrapper_generate_params params);
 char* llama_wrapper_generate_with_tokens(void* ctx, const int* tokens, int n_tokens, int prefix_len, llama_wrapper_generate_params params);
+
+// Text generation with token usage info
+llama_wrapper_generate_result llama_wrapper_generate_ex(void* ctx, llama_wrapper_generate_params params);
+llama_wrapper_generate_result llama_wrapper_generate_with_tokens_ex(void* ctx, const int* tokens, int n_tokens, int prefix_len, llama_wrapper_generate_params params);
 
 // Speculative generation with draft model
 char* llama_wrapper_generate_draft(void* ctx_target, void* ctx_draft, llama_wrapper_generate_params params);
