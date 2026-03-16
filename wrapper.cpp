@@ -1,6 +1,8 @@
 #include "wrapper.h"
 #include "llama.cpp/include/llama.h"
 #include "llama.cpp/ggml/include/ggml.h"
+#include "llama.cpp/ggml/include/ggml-alloc.h"
+#include "llama.cpp/ggml/include/ggml-backend.h"
 #include "llama.cpp/common/common.h"
 #include "llama.cpp/common/sampling.h"
 #include "llama.cpp/common/speculative.h"
@@ -9,10 +11,12 @@
 #include "mtmd.h"
 #include "mtmd-helper.h"
 
+#include <algorithm>
+#include <chrono>
+#include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
-#include <memory>
-#include <cstring>
 
 // CUDA backend header for GPU info
 #ifdef GGML_USE_CUDA
@@ -1543,6 +1547,148 @@ char* llama_wrapper_vision_generate(void* ctx, void* mtmd_ctx,
         g_last_error = std::string("Vision generation error: ") + e.what();
         return nullptr;
     }
+}
+
+// --- GPU benchmark ---
+
+bool llama_wrapper_bench_gpu(int device_id, llama_wrapper_bench_result* result) {
+    if (!result) return false;
+
+#ifdef GGML_USE_CUDA
+    int count = ggml_backend_cuda_get_device_count();
+    if (device_id < 0 || device_id >= count) return false;
+
+    ggml_backend_t backend = ggml_backend_cuda_init(device_id);
+    if (!backend) return false;
+
+    // --- Bandwidth benchmark: copy 256 MB to/from GPU ---
+    {
+        const size_t buf_size = 256 * 1024 * 1024;
+        ggml_backend_buffer_t buf = ggml_backend_alloc_buffer(backend, buf_size);
+        if (!buf) {
+            ggml_backend_free(backend);
+            return false;
+        }
+
+        // Create host data to transfer.
+        std::vector<uint8_t> host_data(buf_size, 0x42);
+
+        // Create a dummy tensor spanning the buffer for set/get operations.
+        struct ggml_init_params ctx_params = {
+            /* .mem_size   = */ 1024,
+            /* .mem_buffer = */ nullptr,
+            /* .no_alloc   = */ true,
+        };
+        struct ggml_context* ctx = ggml_init(ctx_params);
+        struct ggml_tensor* t = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, (int64_t)(buf_size / sizeof(float)));
+        ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
+        ggml_backend_buffer_t tbuf = ggml_backend_buft_alloc_buffer(buft, ggml_nbytes(t));
+        if (tbuf) {
+            ggml_backend_tensor_alloc(tbuf, t, ggml_backend_buffer_get_base(tbuf));
+
+            // Warmup (3 rounds).
+            for (int i = 0; i < 3; i++) {
+                ggml_backend_tensor_set(t, host_data.data(), 0, buf_size);
+                ggml_backend_tensor_get(t, host_data.data(), 0, buf_size);
+                ggml_backend_synchronize(backend);
+            }
+
+            // Timed: host→device + device→host, per-iteration timing for median.
+            const int iters = 9;
+            double samples[9];
+            double bytes_per_iter = (double)buf_size * 2.0;
+            for (int i = 0; i < iters; i++) {
+                auto t0 = std::chrono::high_resolution_clock::now();
+                ggml_backend_tensor_set(t, host_data.data(), 0, buf_size);
+                ggml_backend_tensor_get(t, host_data.data(), 0, buf_size);
+                ggml_backend_synchronize(backend);
+                auto t1 = std::chrono::high_resolution_clock::now();
+                double secs = std::chrono::duration<double>(t1 - t0).count();
+                samples[i] = (secs > 0) ? bytes_per_iter / secs / 1e9 : 0;
+            }
+            std::sort(samples, samples + iters);
+            result->bandwidth_gbs = samples[iters / 2]; // median
+
+            ggml_backend_buffer_free(tbuf);
+        } else {
+            result->bandwidth_gbs = 0;
+        }
+
+        ggml_free(ctx);
+        ggml_backend_buffer_free(buf);
+    }
+
+    // --- Compute benchmark: FP32 matrix multiply ---
+    {
+        const int M = 512;
+        const int N = 512;
+        const int K = 512;
+
+        // ggml_mul_mat: result[M,N] = A[K,M]^T * B[K,N]
+        // Memory needed: 3 tensors + graph overhead.
+        size_t mem_size = ggml_tensor_overhead() * 4 + ggml_graph_overhead();
+        struct ggml_init_params ctx_params = {
+            /* .mem_size   = */ mem_size,
+            /* .mem_buffer = */ nullptr,
+            /* .no_alloc   = */ true,
+        };
+        struct ggml_context* ctx = ggml_init(ctx_params);
+
+        struct ggml_tensor* a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, K, M);
+        struct ggml_tensor* b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, K, N);
+        struct ggml_tensor* c = ggml_mul_mat(ctx, a, b);
+
+        struct ggml_cgraph* graph = ggml_new_graph(ctx);
+        ggml_build_forward_expand(graph, c);
+
+        // Allocate tensors on GPU.
+        ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
+        ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx, buft);
+        if (buf) {
+            // Fill A, B with data on host then upload.
+            size_t a_size = ggml_nbytes(a);
+            size_t b_size = ggml_nbytes(b);
+            std::vector<float> host_a(a_size / sizeof(float), 1.0f);
+            std::vector<float> host_b(b_size / sizeof(float), 1.0f);
+            ggml_backend_tensor_set(a, host_a.data(), 0, a_size);
+            ggml_backend_tensor_set(b, host_b.data(), 0, b_size);
+            ggml_backend_synchronize(backend);
+
+            // Warmup (3 rounds).
+            for (int i = 0; i < 3; i++) {
+                ggml_backend_graph_compute(backend, graph);
+                ggml_backend_synchronize(backend);
+            }
+
+            // Timed runs, per-iteration timing for median.
+            const int iters = 9;
+            double samples[9];
+            double flops_per_iter = 2.0 * M * N * K;
+            for (int i = 0; i < iters; i++) {
+                auto t0 = std::chrono::high_resolution_clock::now();
+                ggml_backend_graph_compute(backend, graph);
+                ggml_backend_synchronize(backend);
+                auto t1 = std::chrono::high_resolution_clock::now();
+                double secs = std::chrono::duration<double>(t1 - t0).count();
+                samples[i] = (secs > 0) ? flops_per_iter / secs / 1e9 : 0;
+            }
+            std::sort(samples, samples + iters);
+            result->gflops = samples[iters / 2]; // median
+
+            ggml_backend_buffer_free(buf);
+        } else {
+            result->gflops = 0;
+        }
+
+        ggml_free(ctx);
+    }
+
+    ggml_backend_free(backend);
+    return true;
+#else
+    (void)device_id;
+    return false;
+#endif
 }
 
 } // extern "C"

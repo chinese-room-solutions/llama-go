@@ -227,6 +227,16 @@ typedef struct {
 
 void llama_wrapper_get_runtime_info(void* model, void* ctx, const char* kv_cache_type, llama_wrapper_runtime_info* info);
 
+// Device benchmark result
+typedef struct {
+    double bandwidth_gbs; // Memory bandwidth in GB/s (buffer copy throughput)
+    double gflops;        // Compute throughput in GFLOPS (matmul)
+} llama_wrapper_bench_result;
+
+// Run a lightweight GPU benchmark on the given CUDA device.
+// Returns true on success, false if CUDA is not available or device_id is invalid.
+bool llama_wrapper_bench_gpu(int device_id, llama_wrapper_bench_result* result);
+
 // Vision/multimodal support (mtmd)
 
 // Initialize multimodal context from mmproj file.

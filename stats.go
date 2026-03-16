@@ -195,6 +195,49 @@ func (s *ModelStats) String() string {
 	return b.String()
 }
 
+// GPUCount returns the number of available CUDA GPU devices.
+// Returns 0 if CUDA is not available.
+func GPUCount() int {
+	return int(C.llama_wrapper_get_gpu_count())
+}
+
+// GetGPUInfo returns information about the GPU at the given device index.
+// Returns (info, true) on success, or (GPUInfo{}, false) if the device is
+// not available or CUDA is not compiled in.
+func GetGPUInfo(deviceID int) (GPUInfo, bool) {
+	var cInfo C.llama_wrapper_gpu_info
+	if !C.llama_wrapper_get_gpu_info(C.int(deviceID), &cInfo) {
+		return GPUInfo{}, false
+	}
+	return GPUInfo{
+		DeviceID:      int(cInfo.device_id),
+		DeviceName:    C.GoString(&cInfo.device_name[0]),
+		FreeMemoryMB:  int(cInfo.free_memory_mb),
+		TotalMemoryMB: int(cInfo.total_memory_mb),
+	}, true
+}
+
+// BenchResult holds the outcome of a GPU benchmark.
+type BenchResult struct {
+	BandwidthGBs float64 // Memory transfer bandwidth in GB/s
+	GFlops       float64 // FP32 matmul throughput in GFLOPS
+}
+
+// BenchGPU runs a lightweight benchmark on the given CUDA device, measuring
+// memory bandwidth (host↔device copy) and compute throughput (FP32 matmul).
+// Returns (result, true) on success, or (BenchResult{}, false) if CUDA is not
+// available or the device ID is invalid.
+func BenchGPU(deviceID int) (BenchResult, bool) {
+	var cResult C.llama_wrapper_bench_result
+	if !C.llama_wrapper_bench_gpu(C.int(deviceID), &cResult) {
+		return BenchResult{}, false
+	}
+	return BenchResult{
+		BandwidthGBs: float64(cResult.bandwidth_gbs),
+		GFlops:       float64(cResult.gflops),
+	}, true
+}
+
 // formatNumber formats an integer with thousand separators for readability.
 func formatNumber(n int) string {
 	if n < 1000 {
