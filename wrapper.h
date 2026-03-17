@@ -238,6 +238,18 @@ typedef struct {
 // Returns true on success, false if CUDA is not available or device_id is invalid.
 bool llama_wrapper_bench_gpu(int device_id, llama_wrapper_bench_result* result);
 
+// Run a memory bandwidth benchmark using device-local ggml_add.
+// device_type: 0 = CPU, 1 = GPU (device_id specifies which GPU).
+// Returns memory bandwidth in GB/s. Works identically on both backends.
+bool llama_wrapper_bench_bandwidth(int device_type, int device_id, int n_threads, double* bandwidth_gbs);
+
+// Run a Q4_K matmul benchmark on GPU or CPU.
+// This gives a single comparable score across device types.
+// device_type: 0 = CPU, 1 = GPU (device_id specifies which GPU).
+// Returns throughput in GFLOPS.
+// Returns true on success, false on error.
+bool llama_wrapper_bench_q4k_matvec(int device_type, int device_id, int n_threads, double* score_gflops);
+
 // Vision/multimodal support (mtmd)
 
 // Initialize multimodal context from mmproj file.

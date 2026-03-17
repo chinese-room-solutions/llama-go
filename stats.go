@@ -241,6 +241,46 @@ func BenchGPU(deviceID int) (BenchResult, bool) {
 	}, true
 }
 
+// BenchBandwidthCPU measures RAM bandwidth using device-local ggml_add on the
+// CPU backend. Returns bandwidth in GB/s. Directly comparable to BenchBandwidthGPU.
+func BenchBandwidthCPU(nThreads int) (float64, bool) {
+	var bw C.double
+	if !C.llama_wrapper_bench_bandwidth(0, 0, C.int(nThreads), &bw) {
+		return 0, false
+	}
+	return float64(bw), true
+}
+
+// BenchBandwidthGPU measures VRAM bandwidth using device-local ggml_add on the
+// CUDA backend. Returns bandwidth in GB/s. Directly comparable to BenchBandwidthCPU.
+func BenchBandwidthGPU(deviceID int) (float64, bool) {
+	var bw C.double
+	if !C.llama_wrapper_bench_bandwidth(1, C.int(deviceID), 0, &bw) {
+		return 0, false
+	}
+	return float64(bw), true
+}
+
+// BenchQ4KMatVecGPU runs a Q4_K matmul benchmark on the given CUDA device.
+// Returns throughput in GFLOPS. Directly comparable to BenchQ4KMatVecCPU.
+func BenchQ4KMatVecGPU(deviceID int) (float64, bool) {
+	var score C.double
+	if !C.llama_wrapper_bench_q4k_matvec(1, C.int(deviceID), 0, &score) {
+		return 0, false
+	}
+	return float64(score), true
+}
+
+// BenchQ4KMatVecCPU runs a Q4_K matmul benchmark on the CPU.
+// Returns throughput in GFLOPS. Directly comparable to BenchQ4KMatVecGPU.
+func BenchQ4KMatVecCPU(nThreads int) (float64, bool) {
+	var score C.double
+	if !C.llama_wrapper_bench_q4k_matvec(0, 0, C.int(nThreads), &score) {
+		return 0, false
+	}
+	return float64(score), true
+}
+
 // formatNumber formats an integer with thousand separators for readability.
 func formatNumber(n int) string {
 	if n < 1000 {

@@ -11,6 +11,8 @@
 #include "mtmd.h"
 #include "mtmd-helper.h"
 
+#include "llama.cpp/ggml/include/ggml-cpu.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -1640,61 +1642,20 @@ bool llama_wrapper_bench_gpu(int device_id, llama_wrapper_bench_result* result) 
     ggml_backend_t backend = ggml_backend_cuda_init(device_id);
     if (!backend) return false;
 
-    // --- Bandwidth benchmark: copy 256 MB to/from GPU ---
+    // --- Bandwidth benchmark: delegate to shared ggml_add benchmark ---
     {
-        const size_t buf_size = 256 * 1024 * 1024;
-        ggml_backend_buffer_t buf = ggml_backend_alloc_buffer(backend, buf_size);
-        if (!buf) {
-            ggml_backend_free(backend);
-            return false;
-        }
-
-        // Create host data to transfer.
-        std::vector<uint8_t> host_data(buf_size, 0x42);
-
-        // Create a dummy tensor spanning the buffer for set/get operations.
-        struct ggml_init_params ctx_params = {
-            /* .mem_size   = */ 1024,
-            /* .mem_buffer = */ nullptr,
-            /* .no_alloc   = */ true,
-        };
-        struct ggml_context* ctx = ggml_init(ctx_params);
-        struct ggml_tensor* t = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, (int64_t)(buf_size / sizeof(float)));
-        ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
-        ggml_backend_buffer_t tbuf = ggml_backend_buft_alloc_buffer(buft, ggml_nbytes(t));
-        if (tbuf) {
-            ggml_backend_tensor_alloc(tbuf, t, ggml_backend_buffer_get_base(tbuf));
-
-            // Warmup (3 rounds).
-            for (int i = 0; i < 3; i++) {
-                ggml_backend_tensor_set(t, host_data.data(), 0, buf_size);
-                ggml_backend_tensor_get(t, host_data.data(), 0, buf_size);
-                ggml_backend_synchronize(backend);
-            }
-
-            // Timed: host→device + device→host, per-iteration timing for median.
-            const int iters = 9;
-            double samples[9];
-            double bytes_per_iter = (double)buf_size * 2.0;
-            for (int i = 0; i < iters; i++) {
-                auto t0 = std::chrono::high_resolution_clock::now();
-                ggml_backend_tensor_set(t, host_data.data(), 0, buf_size);
-                ggml_backend_tensor_get(t, host_data.data(), 0, buf_size);
-                ggml_backend_synchronize(backend);
-                auto t1 = std::chrono::high_resolution_clock::now();
-                double secs = std::chrono::duration<double>(t1 - t0).count();
-                samples[i] = (secs > 0) ? bytes_per_iter / secs / 1e9 : 0;
-            }
-            std::sort(samples, samples + iters);
-            result->bandwidth_gbs = samples[iters / 2]; // median
-
-            ggml_backend_buffer_free(tbuf);
+        double bw = 0;
+        // Note: we can't call llama_wrapper_bench_bandwidth here because the
+        // backend is already initialized above. Instead, we temporarily free it,
+        // call the shared function, then re-init for the compute benchmark.
+        ggml_backend_free(backend);
+        if (llama_wrapper_bench_bandwidth(1, device_id, 0, &bw)) {
+            result->bandwidth_gbs = bw;
         } else {
             result->bandwidth_gbs = 0;
         }
-
-        ggml_free(ctx);
-        ggml_backend_buffer_free(buf);
+        backend = ggml_backend_cuda_init(device_id);
+        if (!backend) return false;
     }
 
     // --- Compute benchmark: FP32 matrix multiply ---
@@ -1733,15 +1694,15 @@ bool llama_wrapper_bench_gpu(int device_id, llama_wrapper_bench_result* result) 
             ggml_backend_tensor_set(b, host_b.data(), 0, b_size);
             ggml_backend_synchronize(backend);
 
-            // Warmup (3 rounds).
-            for (int i = 0; i < 3; i++) {
+            // Warmup.
+            for (int i = 0; i < 5; i++) {
                 ggml_backend_graph_compute(backend, graph);
                 ggml_backend_synchronize(backend);
             }
 
-            // Timed runs, per-iteration timing for median.
-            const int iters = 9;
-            double samples[9];
+            // Timed runs, 21 iterations with median for stability.
+            const int iters = 21;
+            double samples[21];
             double flops_per_iter = 2.0 * M * N * K;
             for (int i = 0; i < iters; i++) {
                 auto t0 = std::chrono::high_resolution_clock::now();
@@ -1768,6 +1729,224 @@ bool llama_wrapper_bench_gpu(int device_id, llama_wrapper_bench_result* result) 
     (void)device_id;
     return false;
 #endif
+}
+
+// --- Memory bandwidth benchmark (device-local ggml_add, works on CPU and GPU) ---
+
+bool llama_wrapper_bench_bandwidth(int device_type, int device_id, int n_threads, double* bandwidth_gbs) {
+    if (!bandwidth_gbs) return false;
+    *bandwidth_gbs = 0;
+
+    // ggml_add reads 2 tensors and writes 1 → 3× tensor_size bytes through memory.
+    const int64_t n_elements = 64 * 1024 * 1024; // 64M floats = 256 MB per tensor
+
+    // Initialize backend.
+    ggml_backend_t backend = nullptr;
+    if (device_type == 0) {
+        backend = ggml_backend_cpu_init();
+        if (backend && n_threads > 0) {
+            ggml_backend_cpu_set_n_threads(backend, n_threads);
+        }
+    } else {
+#ifdef GGML_USE_CUDA
+        int count = ggml_backend_cuda_get_device_count();
+        if (device_id < 0 || device_id >= count) return false;
+        backend = ggml_backend_cuda_init(device_id);
+#else
+        (void)device_id;
+        return false;
+#endif
+    }
+    if (!backend) return false;
+
+    size_t mem_size = ggml_tensor_overhead() * 4 + ggml_graph_overhead();
+    struct ggml_init_params ctx_params = {
+        /* .mem_size   = */ mem_size,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true,
+    };
+    struct ggml_context* ctx = ggml_init(ctx_params);
+    if (!ctx) {
+        ggml_backend_free(backend);
+        return false;
+    }
+
+    struct ggml_tensor* a = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_elements);
+    struct ggml_tensor* b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_elements);
+    struct ggml_tensor* c = ggml_add(ctx, a, b);
+
+    struct ggml_cgraph* graph = ggml_new_graph(ctx);
+    ggml_build_forward_expand(graph, c);
+
+    ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx, buft);
+    if (!buf) {
+        ggml_free(ctx);
+        ggml_backend_free(backend);
+        return false;
+    }
+
+    // Fill tensors.
+    size_t tensor_bytes = ggml_nbytes(a);
+    std::vector<float> host_data(n_elements, 1.0f);
+    ggml_backend_tensor_set(a, host_data.data(), 0, tensor_bytes);
+    ggml_backend_tensor_set(b, host_data.data(), 0, tensor_bytes);
+    ggml_backend_synchronize(backend);
+
+    // Warmup.
+    for (int i = 0; i < 5; i++) {
+        ggml_backend_graph_compute(backend, graph);
+        ggml_backend_synchronize(backend);
+    }
+
+    // Timed runs: 2 reads + 1 write = 3× tensor_bytes per iteration.
+    // 21 iterations with median for stable results.
+    const int iters = 21;
+    double samples[21];
+    double bytes_per_iter = 3.0 * (double)tensor_bytes;
+    for (int i = 0; i < iters; i++) {
+        auto t0 = std::chrono::high_resolution_clock::now();
+        ggml_backend_graph_compute(backend, graph);
+        ggml_backend_synchronize(backend);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        double secs = std::chrono::duration<double>(t1 - t0).count();
+        samples[i] = (secs > 0) ? bytes_per_iter / secs / 1e9 : 0;
+    }
+    std::sort(samples, samples + iters);
+    *bandwidth_gbs = samples[iters / 2]; // median
+
+    ggml_backend_buffer_free(buf);
+    ggml_free(ctx);
+    ggml_backend_free(backend);
+    return true;
+}
+
+// --- Q4_K matrix-vector benchmark (comparable across CPU/GPU) ---
+
+bool llama_wrapper_bench_q4k_matvec(int device_type, int device_id, int n_threads, double* score_gbs) {
+    if (!score_gbs) return false;
+    *score_gbs = 0;
+
+    // Matrix dimensions: simulates realistic LLM decode (single token, large layer).
+    const int64_t M = 8192; // rows of weight matrix
+    const int64_t K = 8192; // columns of weight matrix
+    const int64_t N = 1;    // single token — matches autoregressive decode
+
+    // Initialize backend.
+    ggml_backend_t backend = nullptr;
+    if (device_type == 0) {
+        // CPU backend.
+        backend = ggml_backend_cpu_init();
+        if (backend && n_threads > 0) {
+            ggml_backend_cpu_set_n_threads(backend, n_threads);
+        }
+    } else {
+#ifdef GGML_USE_CUDA
+        int count = ggml_backend_cuda_get_device_count();
+        if (device_id < 0 || device_id >= count) return false;
+        backend = ggml_backend_cuda_init(device_id);
+#else
+        (void)device_id;
+        return false;
+#endif
+    }
+    if (!backend) return false;
+
+    // Build a graph with multiple chained matmuls to simulate an LLM forward
+    // pass (multiple layers). This keeps the GPU busy within a single
+    // graph_compute call, avoiding dispatch overhead between layers.
+    const int n_layers = 32; // simulate 32 transformer layers
+
+    // Context needs room for: n_layers weight tensors + n_layers+1 activation
+    // tensors + graph overhead.
+    size_t mem_size = ggml_tensor_overhead() * (2 * n_layers + 2) + ggml_graph_overhead();
+    struct ggml_init_params ctx_params = {
+        /* .mem_size   = */ mem_size,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true,
+    };
+    struct ggml_context* ctx = ggml_init(ctx_params);
+    if (!ctx) {
+        ggml_backend_free(backend);
+        return false;
+    }
+
+    // Build chain: x0 → W0*x0 → W1*x1 → ... → W31*x31
+    // All weight matrices share the same dimensions (M=K so output feeds next input).
+    struct ggml_tensor* weights[32];
+    struct ggml_tensor* x0 = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, K, N);
+    struct ggml_tensor* x = x0;
+    for (int i = 0; i < n_layers; i++) {
+        weights[i] = ggml_new_tensor_2d(ctx, GGML_TYPE_Q4_K, K, M);
+        x = ggml_mul_mat(ctx, weights[i], x);
+    }
+
+    struct ggml_cgraph* graph = ggml_new_graph_custom(ctx, 2 * n_layers + 1, false);
+    ggml_build_forward_expand(graph, x);
+
+    // Allocate tensors on the backend.
+    ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx, buft);
+    if (!buf) {
+        ggml_free(ctx);
+        ggml_backend_free(backend);
+        return false;
+    }
+
+    // Fill weight matrices with quantized data.
+    {
+        size_t n_elements = M * K;
+        std::vector<float> src(n_elements);
+        for (size_t i = 0; i < n_elements; i++) {
+            src[i] = 0.5f - (float)(i % 1000) / 1000.0f;
+        }
+        size_t w_size = ggml_nbytes(weights[0]);
+        std::vector<uint8_t> q4_data(w_size);
+        ggml_quantize_chunk(GGML_TYPE_Q4_K, src.data(), q4_data.data(), 0, M, K, nullptr);
+        for (int i = 0; i < n_layers; i++) {
+            ggml_backend_tensor_set(weights[i], q4_data.data(), 0, w_size);
+        }
+    }
+
+    // Fill input activation with ones.
+    {
+        size_t b_elements = K * N;
+        std::vector<float> host_x(b_elements, 1.0f);
+        ggml_backend_tensor_set(x0, host_x.data(), 0, ggml_nbytes(x0));
+    }
+
+    ggml_backend_synchronize(backend);
+
+    // Warmup — run enough to reach thermal steady state.
+    for (int i = 0; i < 20; i++) {
+        ggml_backend_graph_compute(backend, graph);
+        ggml_backend_synchronize(backend);
+    }
+
+    // Timed runs — batch multiple graph_computes per sample for stable timing.
+    // Each graph_compute = n_layers matmuls.
+    const int reps_per_sample = 10;
+    const int n_samples = 21;
+    double flops_per_graph = (double)n_layers * 2.0 * M * K * N;
+    double total_flops = flops_per_graph * reps_per_sample;
+    double samples[21];
+    for (int i = 0; i < n_samples; i++) {
+        auto t0 = std::chrono::high_resolution_clock::now();
+        for (int r = 0; r < reps_per_sample; r++) {
+            ggml_backend_graph_compute(backend, graph);
+        }
+        ggml_backend_synchronize(backend);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        double secs = std::chrono::duration<double>(t1 - t0).count();
+        samples[i] = (secs > 0) ? total_flops / secs / 1e9 : 0; // GFLOPS
+    }
+    std::sort(samples, samples + n_samples);
+    *score_gbs = samples[n_samples / 2]; // GFLOPS
+
+    ggml_backend_buffer_free(buf);
+    ggml_free(ctx);
+    ggml_backend_free(backend);
+    return true;
 }
 
 } // extern "C"
