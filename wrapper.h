@@ -211,6 +211,7 @@ typedef struct {
     char device_name[256];
     int free_memory_mb;
     int total_memory_mb;
+    int utilization_pct;  // 0-100, GPU compute utilization (-1 if unavailable)
 } llama_wrapper_gpu_info;
 
 int llama_wrapper_get_gpu_count();

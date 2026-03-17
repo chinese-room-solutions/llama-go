@@ -23,6 +23,82 @@
 #include "llama.cpp/ggml/include/ggml-cuda.h"
 #endif
 
+// NVML dynamic loading for GPU utilization
+#ifdef GGML_USE_CUDA
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
+// Minimal NVML type definitions (avoids requiring nvml.h)
+typedef void* nvmlDevice_t;
+typedef enum { NVML_SUCCESS = 0 } nvmlReturn_t;
+typedef struct { unsigned int gpu; unsigned int memory; } nvmlUtilization_t;
+
+typedef nvmlReturn_t (*nvmlInit_t)(void);
+typedef nvmlReturn_t (*nvmlDeviceGetHandleByIndex_t)(unsigned int, nvmlDevice_t*);
+typedef nvmlReturn_t (*nvmlDeviceGetUtilizationRates_t)(nvmlDevice_t, nvmlUtilization_t*);
+
+static struct {
+    bool attempted = false;
+    bool available = false;
+    nvmlInit_t init = nullptr;
+    nvmlDeviceGetHandleByIndex_t getHandle = nullptr;
+    nvmlDeviceGetUtilizationRates_t getUtil = nullptr;
+} g_nvml;
+
+static void nvml_load() {
+    if (g_nvml.attempted) return;
+    g_nvml.attempted = true;
+
+    void* lib = nullptr;
+#ifdef _WIN32
+    // Try NVML from CUDA toolkit or driver path.
+    lib = (void*)LoadLibraryA("nvml.dll");
+    if (!lib) {
+        // Try System32 path where nvidia drivers install it.
+        char path[MAX_PATH];
+        GetSystemDirectoryA(path, sizeof(path));
+        std::string fullpath = std::string(path) + "\\nvml.dll";
+        lib = (void*)LoadLibraryA(fullpath.c_str());
+    }
+#else
+    lib = dlopen("libnvidia-ml.so.1", RTLD_LAZY);
+    if (!lib) lib = dlopen("libnvidia-ml.so", RTLD_LAZY);
+#endif
+    if (!lib) return;
+
+#ifdef _WIN32
+    #define LOADSYM(sym) (void*)GetProcAddress((HMODULE)lib, sym)
+#else
+    #define LOADSYM(sym) dlsym(lib, sym)
+#endif
+
+    g_nvml.init = (nvmlInit_t)LOADSYM("nvmlInit_v2");
+    if (!g_nvml.init) g_nvml.init = (nvmlInit_t)LOADSYM("nvmlInit");
+    g_nvml.getHandle = (nvmlDeviceGetHandleByIndex_t)LOADSYM("nvmlDeviceGetHandleByIndex_v2");
+    if (!g_nvml.getHandle) g_nvml.getHandle = (nvmlDeviceGetHandleByIndex_t)LOADSYM("nvmlDeviceGetHandleByIndex");
+    g_nvml.getUtil = (nvmlDeviceGetUtilizationRates_t)LOADSYM("nvmlDeviceGetUtilizationRates");
+
+    #undef LOADSYM
+
+    if (!g_nvml.init || !g_nvml.getHandle || !g_nvml.getUtil) return;
+    if (g_nvml.init() != NVML_SUCCESS) return;
+    g_nvml.available = true;
+}
+
+static int nvml_get_utilization(int device_id) {
+    nvml_load();
+    if (!g_nvml.available) return -1;
+    nvmlDevice_t dev;
+    if (g_nvml.getHandle((unsigned int)device_id, &dev) != NVML_SUCCESS) return -1;
+    nvmlUtilization_t util;
+    if (g_nvml.getUtil(dev, &util) != NVML_SUCCESS) return -1;
+    return (int)util.gpu;
+}
+#endif // GGML_USE_CUDA
+
 // Global error handling
 static std::string g_last_error;
 
@@ -1226,6 +1302,9 @@ bool llama_wrapper_get_gpu_info(int device_id, llama_wrapper_gpu_info* info) {
     ggml_backend_cuda_get_device_memory(device_id, &free_mem, &total_mem);
     info->free_memory_mb = free_mem / (1024 * 1024);
     info->total_memory_mb = total_mem / (1024 * 1024);
+
+    // Get GPU utilization via NVML (dynamic load)
+    info->utilization_pct = nvml_get_utilization(device_id);
 
     return true;
 #else

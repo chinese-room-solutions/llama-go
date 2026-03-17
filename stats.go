@@ -14,10 +14,11 @@ import (
 
 // GPUInfo contains information about a CUDA GPU device.
 type GPUInfo struct {
-	DeviceID      int    // CUDA device ID
-	DeviceName    string // GPU model name (e.g., "NVIDIA GeForce RTX 3090")
-	FreeMemoryMB  int    // Available VRAM in MB
-	TotalMemoryMB int    // Total VRAM in MB
+	DeviceID       int    // CUDA device ID
+	DeviceName     string // GPU model name (e.g., "NVIDIA GeForce RTX 3090")
+	FreeMemoryMB   int    // Available VRAM in MB
+	TotalMemoryMB  int    // Total VRAM in MB
+	UtilizationPct int    // GPU compute utilization 0-100 (-1 if unavailable)
 }
 
 // ModelMetadata contains model information from GGUF metadata.
@@ -87,10 +88,11 @@ func (m *Model) Stats() (*ModelStats, error) {
 		var cInfo C.llama_wrapper_gpu_info
 		if C.llama_wrapper_get_gpu_info(C.int(i), &cInfo) {
 			stats.GPUs = append(stats.GPUs, GPUInfo{
-				DeviceID:      int(cInfo.device_id),
-				DeviceName:    C.GoString(&cInfo.device_name[0]),
-				FreeMemoryMB:  int(cInfo.free_memory_mb),
-				TotalMemoryMB: int(cInfo.total_memory_mb),
+				DeviceID:       int(cInfo.device_id),
+				DeviceName:     C.GoString(&cInfo.device_name[0]),
+				FreeMemoryMB:   int(cInfo.free_memory_mb),
+				TotalMemoryMB:  int(cInfo.total_memory_mb),
+				UtilizationPct: int(cInfo.utilization_pct),
 			})
 		}
 	}
@@ -210,10 +212,11 @@ func GetGPUInfo(deviceID int) (GPUInfo, bool) {
 		return GPUInfo{}, false
 	}
 	return GPUInfo{
-		DeviceID:      int(cInfo.device_id),
-		DeviceName:    C.GoString(&cInfo.device_name[0]),
-		FreeMemoryMB:  int(cInfo.free_memory_mb),
-		TotalMemoryMB: int(cInfo.total_memory_mb),
+		DeviceID:       int(cInfo.device_id),
+		DeviceName:     C.GoString(&cInfo.device_name[0]),
+		FreeMemoryMB:   int(cInfo.free_memory_mb),
+		TotalMemoryMB:  int(cInfo.total_memory_mb),
+		UtilizationPct: int(cInfo.utilization_pct),
 	}, true
 }
 
