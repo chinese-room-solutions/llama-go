@@ -1310,6 +1310,7 @@ bool llama_wrapper_get_gpu_info(int device_id, llama_wrapper_gpu_info* info) {
 
     return true;
 #else
+    (void)device_id;
     return false;
 #endif
 }
