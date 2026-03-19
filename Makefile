@@ -237,7 +237,7 @@ $(info )
 llama.cpp/ggml.o:
 	@echo "==> Configuring and building llama.cpp core..."
 	mkdir -p build
-	cd build && CC="$(CC)" CXX="$(CXX)" cmake ../llama.cpp $(CMAKE_ARGS) -DLLAMA_CURL=OFF \
+	cd build && CC="$(CC)" CXX="$(CXX)" cmake ../llama.cpp -DBUILD_SHARED_LIBS=OFF $(CMAKE_ARGS) -DLLAMA_CURL=OFF \
 		&& VERBOSE=1 cmake --build . --config Release --target ggml llama \
 		&& cp -rf ggml/src/CMakeFiles/ggml-base.dir/ggml.c.o ../llama.cpp/ggml.o
 
@@ -264,7 +264,18 @@ libbinding.a: llama.cpp/ggml.o wrapper.o $(EXTRA_TARGETS)
 	ar crs libbinding.a wrapper.o $(EXTRA_TARGETS)
 	@echo "==> Copying libraries..."
 	cp build/common/libcommon.a .
-ifneq (,$(findstring -DBUILD_SHARED_LIBS=OFF,$(CMAKE_ARGS)))
+ifneq (,$(findstring -DBUILD_SHARED_LIBS=ON,$(CMAKE_ARGS)))
+	@echo "Copying shared libraries..."
+	cp build/bin/libmtmd.$(SHLIB_EXT) .
+	cp build/bin/libllama.$(SHLIB_EXT) .
+	cp build/bin/libggml.$(SHLIB_EXT) .
+	cp build/bin/libggml-base.$(SHLIB_EXT) .
+	cp build/bin/libggml-cpu.$(SHLIB_EXT) .
+ifeq ($(BUILD_TYPE),cublas)
+	cp build/bin/libggml-cuda.$(SHLIB_EXT) .
+endif
+else
+	@echo "Copying static libraries..."
 	cp build/tools/mtmd/libmtmd.a .
 	cp build/src/libllama.a .
 	cp build/ggml/src/libggml.a .
@@ -274,15 +285,6 @@ ifeq ($(BUILD_TYPE),cublas)
 	cp build/ggml/src/ggml-cuda/libggml-cuda.a . 2>/dev/null || \
 		cp build/ggml/src/libggml-cuda.a . 2>/dev/null || \
 		echo "Warning: libggml-cuda.a not found"
-endif
-else
-	cp build/bin/libmtmd.$(SHLIB_EXT) .
-	cp build/bin/libllama.$(SHLIB_EXT) .
-	cp build/bin/libggml.$(SHLIB_EXT) .
-	cp build/bin/libggml-base.$(SHLIB_EXT) .
-	cp build/bin/libggml-cpu.$(SHLIB_EXT) .
-ifeq ($(BUILD_TYPE),cublas)
-	cp build/bin/libggml-cuda.$(SHLIB_EXT) .
 endif
 endif
 	@echo "    Libraries ready"
