@@ -15,64 +15,64 @@ import (
 */
 import "C"
 
-// visionConfig holds configuration for VisionContext creation.
-type visionConfig struct {
+// mtmdConfig holds configuration for MtmdContext creation.
+type mtmdConfig struct {
 	useGPU    bool
 	threads   int
 	flashAttn string
 }
 
-// VisionOption configures VisionContext creation.
-type VisionOption func(*visionConfig)
+// MtmdOption configures MtmdContext creation.
+type MtmdOption func(*mtmdConfig)
 
-// WithVisionGPU enables or disables GPU offloading for the vision encoder.
+// WithMtmdGPU enables or disables GPU offloading for the multimodal encoder.
 // Default: true.
-func WithVisionGPU(useGPU bool) VisionOption {
-	return func(c *visionConfig) {
+func WithMtmdGPU(useGPU bool) MtmdOption {
+	return func(c *mtmdConfig) {
 		c.useGPU = useGPU
 	}
 }
 
-// WithVisionThreads sets the number of CPU threads for vision encoding.
+// WithMtmdThreads sets the number of CPU threads for multimodal encoding.
 // Default: uses the model's thread count.
-func WithVisionThreads(threads int) VisionOption {
-	return func(c *visionConfig) {
+func WithMtmdThreads(threads int) MtmdOption {
+	return func(c *mtmdConfig) {
 		c.threads = threads
 	}
 }
 
-// WithVisionFlashAttn sets flash attention mode for vision encoding.
+// WithMtmdFlashAttn sets flash attention mode for multimodal encoding.
 // Values: "auto" (default), "enabled", "disabled".
-func WithVisionFlashAttn(flashAttn string) VisionOption {
-	return func(c *visionConfig) {
+func WithMtmdFlashAttn(flashAttn string) MtmdOption {
+	return func(c *mtmdConfig) {
 		c.flashAttn = flashAttn
 	}
 }
 
-// VisionContext wraps an mtmd_context for multimodal (vision) inference.
+// MtmdContext wraps an mtmd_context for multimodal inference (image + audio).
 // It is created from a Model with a path to an mmproj GGUF file.
 //
-// VisionContext is NOT thread-safe — each goroutine/worker should have
-// its own VisionContext instance. Multiple VisionContexts can share the
+// MtmdContext is NOT thread-safe — each goroutine/worker should have
+// its own MtmdContext instance. Multiple MtmdContexts can share the
 // same underlying Model.
 //
 // Example:
 //
-//	vision, err := model.NewVisionContext("/path/to/mmproj.gguf")
+//	mtmd, err := model.NewMtmdContext("/path/to/mmproj.gguf")
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
-//	defer vision.Close()
-type VisionContext struct {
+//	defer mtmd.Close()
+type MtmdContext struct {
 	ptr    unsafe.Pointer // mtmd_context*
 	model  *Model
 	mu     sync.Mutex
 	closed bool
 }
 
-// NewVisionContext creates a multimodal context for vision inference.
+// NewMtmdContext creates a multimodal context for image + audio inference.
 // mmprojPath must point to a valid mmproj GGUF file matching the model.
-func (m *Model) NewVisionContext(mmprojPath string, opts ...VisionOption) (*VisionContext, error) {
+func (m *Model) NewMtmdContext(mmprojPath string, opts ...MtmdOption) (*MtmdContext, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -80,7 +80,7 @@ func (m *Model) NewVisionContext(mmprojPath string, opts ...VisionOption) (*Visi
 		return nil, fmt.Errorf("model has been closed")
 	}
 
-	cfg := visionConfig{
+	cfg := mtmdConfig{
 		useGPU:    true,
 		threads:   runtime.NumCPU(),
 		flashAttn: "auto",
@@ -101,20 +101,20 @@ func (m *Model) NewVisionContext(mmprojPath string, opts ...VisionOption) (*Visi
 	ptr := C.llama_wrapper_mtmd_init(m.modelPtr, cPath,
 		C.bool(cfg.useGPU), C.int(cfg.threads), cFlashAttn)
 	if ptr == nil {
-		return nil, fmt.Errorf("failed to create vision context: %s", C.GoString(C.llama_wrapper_last_error()))
+		return nil, fmt.Errorf("failed to create mtmd context: %s", C.GoString(C.llama_wrapper_last_error()))
 	}
 
-	v := &VisionContext{
+	v := &MtmdContext{
 		ptr:   ptr,
 		model: m,
 	}
-	runtime.SetFinalizer(v, (*VisionContext).Close)
+	runtime.SetFinalizer(v, (*MtmdContext).Close)
 
 	return v, nil
 }
 
-// Close releases the vision context resources.
-func (v *VisionContext) Close() error {
+// Close releases the mtmd context resources.
+func (v *MtmdContext) Close() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 

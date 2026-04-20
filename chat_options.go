@@ -47,9 +47,9 @@ type ChatOptions struct {
 	// Streaming configuration
 	StreamBufferSize int // Buffer size for streaming channels (default: 256)
 
-	// Vision/multimodal context (required when messages contain images)
-	// Each goroutine/worker must use its own VisionContext.
-	VisionContext *VisionContext
+	// Multimodal context (required when messages contain images or audio)
+	// Each goroutine/worker must use its own MtmdContext.
+	MtmdContext *MtmdContext
 }
 
 // ReasoningFormat specifies how reasoning content is handled for models

@@ -1434,7 +1434,7 @@ void llama_wrapper_mtmd_bitmap_free(void* bitmap) {
     }
 }
 
-char* llama_wrapper_vision_generate(void* ctx, void* mtmd_ctx,
+char* llama_wrapper_mtmd_generate(void* ctx, void* mtmd_ctx,
     const char* text, void** bitmaps, int n_bitmaps,
     llama_wrapper_generate_params params) {
     if (!ctx || !mtmd_ctx || !text) {

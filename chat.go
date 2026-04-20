@@ -94,7 +94,7 @@ func parseReasoning(text string, format ReasoningFormat, chatFormat int) (conten
 func (m *Model) chatWithContext(ctx gocontext.Context, c *Context, messages []ChatMessage, opts ChatOptions) (*ChatResponse, error) {
 	// Dispatch to multimodal path if messages contain media
 	if hasMedia(messages) {
-		return m.chatVisionWithContext(ctx, c, messages, opts)
+		return m.chatMtmdWithContext(ctx, c, messages, opts)
 	}
 
 	// Build prompt from messages using chat template
@@ -181,7 +181,7 @@ Loop:
 func (m *Model) chatStreamWithContext(ctx gocontext.Context, c *Context, messages []ChatMessage, opts ChatOptions) (<-chan ChatDelta, <-chan error) {
 	// Dispatch to multimodal path if messages contain media
 	if hasMedia(messages) {
-		return m.chatVisionStreamWithContext(ctx, c, messages, opts)
+		return m.chatMtmdStreamWithContext(ctx, c, messages, opts)
 	}
 
 	bufferSize := 256
@@ -356,17 +356,17 @@ func hasMedia(messages []ChatMessage) bool {
 	return false
 }
 
-// chatVisionWithContext implements non-streaming vision chat completion.
-func (m *Model) chatVisionWithContext(ctx gocontext.Context, c *Context, messages []ChatMessage, opts ChatOptions) (*ChatResponse, error) {
-	vision := opts.VisionContext
-	if vision == nil {
-		return nil, fmt.Errorf("vision context required: messages contain media but ChatOptions.VisionContext is nil")
+// chatMtmdWithContext implements non-streaming multimodal chat completion.
+func (m *Model) chatMtmdWithContext(ctx gocontext.Context, c *Context, messages []ChatMessage, opts ChatOptions) (*ChatResponse, error) {
+	mtmd := opts.MtmdContext
+	if mtmd == nil {
+		return nil, fmt.Errorf("mtmd context required: messages contain media but ChatOptions.MtmdContext is nil")
 	}
 
 	// Preprocess messages: extract media and insert markers
 	textMessages, media := collectMedia(messages)
 
-	logInfo("vision: n_media=%d", len(media))
+	logInfo("mtmd: n_media=%d", len(media))
 
 	// Format with chat template (markers are treated as text by the template)
 	prompt, err := formatChatMessages(m, textMessages, opts)
@@ -376,12 +376,12 @@ func (m *Model) chatVisionWithContext(ctx gocontext.Context, c *Context, message
 
 	// Build generation config from chat options
 	config := defaultGenerateConfig
-	for _, opt := range buildVisionGenOpts(opts) {
+	for _, opt := range buildMtmdGenOpts(opts) {
 		opt(&config)
 	}
 
-	// Call vision generate via context
-	fullOutput, err := c.generateVisionWithConfig(prompt, vision, media, config, nil)
+	// Call mtmd generate via context
+	fullOutput, err := c.generateMtmdWithConfig(prompt, mtmd, media, config, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -400,8 +400,8 @@ func (m *Model) chatVisionWithContext(ctx gocontext.Context, c *Context, message
 	}, nil
 }
 
-// chatVisionStreamWithContext implements streaming vision chat completion.
-func (m *Model) chatVisionStreamWithContext(ctx gocontext.Context, c *Context, messages []ChatMessage, opts ChatOptions) (<-chan ChatDelta, <-chan error) {
+// chatMtmdStreamWithContext implements streaming multimodal chat completion.
+func (m *Model) chatMtmdStreamWithContext(ctx gocontext.Context, c *Context, messages []ChatMessage, opts ChatOptions) (<-chan ChatDelta, <-chan error) {
 	bufferSize := 256
 	if opts.StreamBufferSize > 0 {
 		bufferSize = opts.StreamBufferSize
@@ -414,9 +414,9 @@ func (m *Model) chatVisionStreamWithContext(ctx gocontext.Context, c *Context, m
 		defer close(deltaCh)
 		defer close(errCh)
 
-		vision := opts.VisionContext
-		if vision == nil {
-			errCh <- fmt.Errorf("vision context required: messages contain media but ChatOptions.VisionContext is nil")
+		mtmd := opts.MtmdContext
+		if mtmd == nil {
+			errCh <- fmt.Errorf("mtmd context required: messages contain media but ChatOptions.MtmdContext is nil")
 			return
 		}
 
@@ -429,7 +429,7 @@ func (m *Model) chatVisionStreamWithContext(ctx gocontext.Context, c *Context, m
 		}
 
 		config := defaultGenerateConfig
-		for _, opt := range buildVisionGenOpts(opts) {
+		for _, opt := range buildMtmdGenOpts(opts) {
 			opt(&config)
 		}
 
@@ -470,7 +470,7 @@ func (m *Model) chatVisionStreamWithContext(ctx gocontext.Context, c *Context, m
 			return true
 		}
 
-		_, err = c.generateVisionWithConfig(prompt, vision, media, config, callback)
+		_, err = c.generateMtmdWithConfig(prompt, mtmd, media, config, callback)
 		if err != nil {
 			select {
 			case errCh <- err:
@@ -482,8 +482,8 @@ func (m *Model) chatVisionStreamWithContext(ctx gocontext.Context, c *Context, m
 	return deltaCh, errCh
 }
 
-// buildVisionGenOpts converts ChatOptions to GenerateOptions for vision calls.
-func buildVisionGenOpts(opts ChatOptions) []GenerateOption {
+// buildMtmdGenOpts converts ChatOptions to GenerateOptions for mtmd calls.
+func buildMtmdGenOpts(opts ChatOptions) []GenerateOption {
 	var genOpts []GenerateOption
 	if opts.MaxTokens != nil {
 		genOpts = append(genOpts, WithMaxTokens(*opts.MaxTokens))

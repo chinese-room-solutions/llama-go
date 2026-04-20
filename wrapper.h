@@ -250,7 +250,7 @@ bool llama_wrapper_bench_bandwidth(int device_type, int device_id, int n_threads
 // Returns true on success, false on error.
 bool llama_wrapper_bench_q4k_matvec(int device_type, int device_id, int n_threads, double* score_gflops);
 
-// Vision/multimodal support (mtmd)
+// Multimodal support (mtmd) — handles both image and audio modalities
 
 // Initialize multimodal context from mmproj file.
 // model: opaque model pointer from llama_wrapper_model_load
@@ -265,13 +265,13 @@ void* llama_wrapper_mtmd_bitmap_from_buf(void* mtmd_ctx,
     const unsigned char* buf, int len);
 void  llama_wrapper_mtmd_bitmap_free(void* bitmap);
 
-// Vision generate: format text with <__media__> markers, tokenize with images,
-// eval chunks into KV cache, then sample response.
-// text: formatted prompt with <__media__> markers where images should be inserted
+// Multimodal generate: format text with <__media__> markers, tokenize with media
+// (image or audio), eval chunks into KV cache, then sample response.
+// text: formatted prompt with <__media__> markers where media should be inserted
 // bitmaps: array of opaque bitmap pointers
 // n_bitmaps: number of bitmaps (must match number of markers in text)
 // Returns generated text (caller frees with llama_wrapper_free_result), or NULL on error.
-char* llama_wrapper_vision_generate(void* ctx, void* mtmd_ctx,
+char* llama_wrapper_mtmd_generate(void* ctx, void* mtmd_ctx,
     const char* text, void** bitmaps, int n_bitmaps,
     llama_wrapper_generate_params params);
 

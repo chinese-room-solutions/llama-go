@@ -695,11 +695,11 @@ func (c *Context) generateWithConfig(prompt string, config generateConfig, callb
 	return result, nil
 }
 
-// generateVisionWithConfig generates text from a prompt with media using a vision context.
+// generateMtmdWithConfig generates text from a prompt with media using an mtmd context.
 // The prompt should contain <__media__> markers where media should be inserted.
 // Media items are raw bytes — images (jpg/png/bmp/gif) or audio (wav).
 // The underlying mtmd layer auto-detects the media type from the byte content.
-func (c *Context) generateVisionWithConfig(prompt string, vision *VisionContext, media [][]byte, config generateConfig, callback func(string) bool) (string, error) {
+func (c *Context) generateMtmdWithConfig(prompt string, mtmd *MtmdContext, media [][]byte, config generateConfig, callback func(string) bool) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -717,10 +717,10 @@ func (c *Context) generateVisionWithConfig(prompt string, vision *VisionContext,
 		return "", fmt.Errorf("model is closed")
 	}
 
-	vision.mu.Lock()
-	defer vision.mu.Unlock()
-	if vision.closed {
-		return "", fmt.Errorf("vision context is closed")
+	mtmd.mu.Lock()
+	defer mtmd.mu.Unlock()
+	if mtmd.closed {
+		return "", fmt.Errorf("mtmd context is closed")
 	}
 
 	// Convert prompt to C string
@@ -731,7 +731,7 @@ func (c *Context) generateVisionWithConfig(prompt string, vision *VisionContext,
 	bitmaps := make([]unsafe.Pointer, len(media))
 	for i, data := range media {
 		cData := C.CBytes(data)
-		bmp := C.llama_wrapper_mtmd_bitmap_from_buf(vision.ptr,
+		bmp := C.llama_wrapper_mtmd_bitmap_from_buf(mtmd.ptr,
 			(*C.uchar)(cData), C.int(len(data)))
 		C.free(cData)
 		if bmp == nil {
@@ -836,12 +836,12 @@ func (c *Context) generateVisionWithConfig(prompt string, vision *VisionContext,
 		bitmapPtrs = &bitmaps[0]
 	}
 
-	cResult := C.llama_wrapper_vision_generate(c.contextPtr, vision.ptr,
+	cResult := C.llama_wrapper_mtmd_generate(c.contextPtr, mtmd.ptr,
 		cPrompt, (*unsafe.Pointer)(unsafe.Pointer(bitmapPtrs)),
 		C.int(len(bitmaps)), params)
 
 	if cResult == nil {
-		return "", fmt.Errorf("vision generation failed: %s", C.GoString(C.llama_wrapper_last_error()))
+		return "", fmt.Errorf("mtmd generation failed: %s", C.GoString(C.llama_wrapper_last_error()))
 	}
 
 	result := C.GoString(cResult)
